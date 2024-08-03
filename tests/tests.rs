@@ -15,7 +15,8 @@ macro_rules! expected {
 // and then check if the text is correctly extracted
 #[test]
 fn extract_expected_text() {
-    let docs = vec![expected!("documents_stack.pdf.link", "mouse button until")];
+    let docs =
+        vec![expected!("documents_stack.pdf.link", "mouse button until")];
     for doc in docs {
         doc.test();
     }
@@ -52,15 +53,21 @@ impl ExpectedText<'_> {
                 // This might race with exists test above, but that's fine
                 if let Err(e) = std::fs::create_dir(docs_cache) {
                     if e.kind() != std::io::ErrorKind::AlreadyExists {
-                        panic!("Failed to create directory {}, {}", docs_cache, e);
+                        panic!(
+                            "Failed to create directory {}, {}",
+                            docs_cache, e
+                        );
                     }
-                } 
+                }
             }
-            let file_path = format!("{}/{}", docs_cache, filename.replace(".link", ""));
+            let file_path =
+                format!("{}/{}", docs_cache, filename.replace(".link", ""));
             if std::path::Path::new(&file_path).exists() {
                 file_path
             } else {
-                let url = std::fs::read_to_string(format!("tests/docs/{}", filename)).unwrap();
+                let url =
+                    std::fs::read_to_string(format!("tests/docs/{}", filename))
+                        .unwrap();
                 let resp = ureq::get(&url).call().unwrap();
                 let mut file = std::fs::File::create(&file_path).unwrap();
                 std::io::copy(&mut resp.into_reader(), &mut file).unwrap();
@@ -69,8 +76,9 @@ impl ExpectedText<'_> {
         } else {
             format!("tests/docs/{}", filename)
         };
-        let out = extract_text(file_path)
-            .unwrap_or_else(|e| panic!("Failed to extract text from {}, {}", filename, e));
+        let out = extract_text(file_path).unwrap_or_else(|e| {
+            panic!("Failed to extract text from {}, {}", filename, e)
+        });
         println!("{}", out);
         assert!(
             out.contains(text),
