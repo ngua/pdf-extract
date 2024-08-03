@@ -8,6 +8,8 @@ pub enum OutputError {
     Io(#[from] std::io::Error),
     #[error("PDF error: {0}")]
     Pdf(#[from] lopdf::Error),
+    #[error("UTF-16 error: {0}")]
+    FromUtf16(#[from] std::string::FromUtf16Error),
     #[error("Other error: {0}")]
     Other(String),
 }

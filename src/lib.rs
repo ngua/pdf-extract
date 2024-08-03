@@ -14,7 +14,6 @@ use euclid::{vec2, *};
 use lopdf::content::Content;
 use lopdf::encryption::DecryptionError;
 use lopdf::*;
-use unicode_normalization::UnicodeNormalization;
 
 use crate::error::OutputError;
 
@@ -69,7 +68,7 @@ fn pdf_to_utf8(s: &[u8]) -> error::Result<String> {
     let s = if s.len() > 2 && s[0] == 0xfe && s[1] == 0xff {
         UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&s[2..])
-            .ok_or_else(|| OutputError::Other(String::from("")))?
+            .ok_or_else(|| OutputError::Other("".into()))?
             .to_string()
     } else {
         let r: Vec<u8> = s
@@ -83,19 +82,19 @@ fn pdf_to_utf8(s: &[u8]) -> error::Result<String> {
 
         UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&r)
-            .ok_or_else(|| OutputError::Other(String::from("")))?
+            .ok_or_else(|| OutputError::Other("".into()))?
             .to_string()
     };
 
     Ok(s)
 }
 
-fn to_utf8(encoding: &[u16], s: &[u8]) -> String {
-    if s.len() > 2 && s[0] == 0xfe && s[1] == 0xff {
-        return UTF_16BE
+fn to_utf8(encoding: &[u16], s: &[u8]) -> error::Result<String> {
+    let r = if s.len() > 2 && s[0] == 0xfe && s[1] == 0xff {
+        UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&s[2..])
-            .unwrap()
-            .to_string();
+            .ok_or_else(|| OutputError::Other("".into()))?
+            .to_string()
     } else {
         let r: Vec<u8> = s
             .iter()
@@ -105,11 +104,14 @@ fn to_utf8(encoding: &[u16], s: &[u8]) -> String {
                 vec![(k >> 8) as u8, k as u8].into_iter()
             })
             .collect();
-        return UTF_16BE
+
+        UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&r)
-            .unwrap()
-            .to_string();
-    }
+            .ok_or_else(|| OutputError::Other("".into()))?
+            .to_string()
+    };
+
+    Ok(r)
 }
 
 fn maybe_deref<'a>(doc: &'a Document, o: &'a Object) -> &'a Object {
@@ -193,15 +195,28 @@ impl<'a, T: FromObj<'a>> FromObj<'a> for [T; 4] {
     fn from_obj(doc: &'a Document, obj: &'a Object) -> Option<Self> {
         maybe_deref(doc, obj)
             .as_array()
-            .map(|x| {
-                let mut all =
-                    x.iter().map(|x| T::from_obj(doc, x).expect("wrong type"));
-                [
-                    all.next().unwrap(),
-                    all.next().unwrap(),
-                    all.next().unwrap(),
-                    all.next().unwrap(),
-                ]
+            .map_err(OutputError::Pdf)
+            .and_then(|x| {
+                let all = x
+                    .iter()
+                    .map(|x| {
+                        T::from_obj(doc, x).ok_or_else(|| {
+                            OutputError::Other("Wrong type".into())
+                        })
+                    })
+                    .collect::<error::Result<Vec<_>>>();
+                match all {
+                    Ok(all) => {
+                        let err = || OutputError::Other("TODO".into());
+                        let mut all = all.into_iter();
+                        let n1 = all.next().ok_or_else(err)?;
+                        let n2 = all.next().ok_or_else(err)?;
+                        let n3 = all.next().ok_or_else(err)?;
+                        let n4 = all.next().ok_or_else(err)?;
+                        Ok([n1, n2, n3, n4])
+                    }
+                    Err(e) => Err(e),
+                }
             })
             .ok()
     }
@@ -211,14 +226,27 @@ impl<'a, T: FromObj<'a>> FromObj<'a> for [T; 3] {
     fn from_obj(doc: &'a Document, obj: &'a Object) -> Option<Self> {
         maybe_deref(doc, obj)
             .as_array()
-            .map(|x| {
-                let mut all =
-                    x.iter().map(|x| T::from_obj(doc, x).expect("wrong type"));
-                [
-                    all.next().unwrap(),
-                    all.next().unwrap(),
-                    all.next().unwrap(),
-                ]
+            .map_err(OutputError::Pdf)
+            .and_then(|x| {
+                let all = x
+                    .iter()
+                    .map(|x| {
+                        T::from_obj(doc, x).ok_or_else(|| {
+                            OutputError::Other("Wrong type".into())
+                        })
+                    })
+                    .collect::<error::Result<Vec<_>>>();
+                match all {
+                    Ok(all) => {
+                        let err = || OutputError::Other("TODO".into());
+                        let mut all = all.into_iter();
+                        let n1 = all.next().ok_or_else(err)?;
+                        let n2 = all.next().ok_or_else(err)?;
+                        let n3 = all.next().ok_or_else(err)?;
+                        Ok([n1, n2, n3])
+                    }
+                    Err(e) => Err(e),
+                }
             })
             .ok()
     }
@@ -281,15 +309,9 @@ fn get_name_string<'a>(
     doc: &'a Document,
     dict: &'a Dictionary,
     key: &[u8],
-) -> String {
-    pdf_to_utf8(
-        dict.get(key)
-            .map(|o| maybe_deref(doc, o))
-            .unwrap_or_else(|_| panic!("deref"))
-            .as_name()
-            .expect("name"),
-    )
-    .unwrap()
+) -> error::Result<String> {
+    let n = dict.get(key).map(|o| maybe_deref(doc, o))?.as_name()?;
+    pdf_to_utf8(n)
 }
 
 #[allow(dead_code)]
@@ -300,7 +322,7 @@ fn maybe_get_name_string<'a>(
 ) -> Option<String> {
     maybe_get_obj(doc, dict, key)
         .and_then(|n| n.as_name().ok())
-        .map(|x| pdf_to_utf8(x).unwrap())
+        .and_then(|x| pdf_to_utf8(x).ok())
 }
 
 fn maybe_get_name<'a>(
@@ -343,7 +365,7 @@ fn make_font<'a>(
     doc: &'a Document,
     font: &'a Dictionary,
 ) -> error::Result<Rc<dyn PdfFont + 'a>> {
-    let subtype = get_name_string(doc, font, b"Subtype");
+    let subtype = get_name_string(doc, font, b"Subtype")?;
     dlog!("MakeFont({})", subtype);
     if subtype == "Type0" {
         Ok(Rc::new(PdfCidFont::new(doc, font)?))
@@ -374,24 +396,30 @@ fn is_core_font(name: &str) -> bool {
     )
 }
 
-fn encoding_to_unicode_table(name: &[u8]) -> Vec<u16> {
+fn encoding_to_unicode_table(name: &[u8]) -> error::Result<Vec<u16>> {
     let encoding = match name {
-        b"MacRomanEncoding" => encodings::MAC_ROMAN_ENCODING,
-        b"MacExpertEncoding" => encodings::MAC_EXPERT_ENCODING,
-        b"WinAnsiEncoding" => encodings::WIN_ANSI_ENCODING,
-        _ => panic!("unexpected encoding {:?}", pdf_to_utf8(name)),
-    };
+        b"MacRomanEncoding" => Ok(encodings::MAC_ROMAN_ENCODING),
+        b"MacExpertEncoding" => Ok(encodings::MAC_EXPERT_ENCODING),
+        b"WinAnsiEncoding" => Ok(encodings::WIN_ANSI_ENCODING),
+        _ => Err(OutputError::Other(format!(
+            "unexpected encoding {:?}",
+            pdf_to_utf8(name)
+        ))),
+    }?;
+
     let encoding_table = encoding
         .iter()
         .map(|x| {
             if let &Some(x) = x {
-                glyphnames::name_to_unicode(x).unwrap()
+                glyphnames::name_to_unicode(x)
+                    .ok_or_else(|| OutputError::Other("TODO".into()))
             } else {
-                0
+                Ok(0)
             }
         })
-        .collect();
-    encoding_table
+        .collect::<error::Result<Vec<_>>>()?;
+
+    Ok(encoding_table)
 }
 
 /* "Glyphs in the font are selected by single-byte character codes obtained from a string that
@@ -405,8 +433,8 @@ impl<'a> PdfSimpleFont<'a> {
         doc: &'a Document,
         font: &'a Dictionary,
     ) -> error::Result<PdfSimpleFont<'a>> {
-        let base_name = get_name_string(doc, font, b"BaseFont");
-        let subtype = get_name_string(doc, font, b"Subtype");
+        let base_name = get_name_string(doc, font, b"BaseFont")?;
+        let subtype = get_name_string(doc, font, b"Subtype")?;
 
         let encoding: Option<&Object> = get(doc, font, b"Encoding");
         dlog!(
@@ -422,68 +450,41 @@ impl<'a> PdfSimpleFont<'a> {
             dlog!("descriptor {:?}", descriptor);
             if subtype == "Type1" {
                 let file = maybe_get_obj(doc, descriptor, b"FontFile");
-                match file {
-                    Some(Object::Stream(s)) => {
-                        let s = get_contents(s);
-                        //dlog!("font contents {:?}", pdf_to_utf8(&s));
-                        type1_encoding = Some(
-                            type1_encoding_parser::get_encoding_map(&s)
-                                .expect("encoding"),
-                        );
-                    }
-                    _ => {
-                        dlog!("font file {:?}", file)
-                    }
+                if let Some(Object::Stream(s)) = file {
+                    let s = get_contents(s);
+                    type1_encoding = Some(
+                        type1_encoding_parser::get_encoding_map(&s)
+                            .expect("encoding"),
+                    );
                 }
             } else if subtype == "TrueType" {
                 let file = maybe_get_obj(doc, descriptor, b"FontFile2");
                 match file {
                     Some(Object::Stream(s)) => {
                         let _s = get_contents(s);
-                        //File::create(format!("/tmp/{}", base_name)).unwrap().write_all(&s);
                     }
                     _ => {
                         dlog!("font file {:?}", file)
                     }
                 }
             }
-
-            let font_file3 =
-                get::<Option<&Object>>(doc, descriptor, b"FontFile3");
-            match font_file3 {
-                Some(Object::Stream(s)) => {
-                    let subtype = get_name_string(doc, &s.dict, b"Subtype");
-                    dlog!("font file {}, {:?}", subtype, s);
-                }
-                None => {}
-                _ => {
-                    dlog!("unexpected")
-                }
-            }
-
-            let charset = maybe_get_obj(doc, descriptor, b"CharSet");
-            let _charset = match charset {
-                Some(Object::String(s, _)) => Some(pdf_to_utf8(s)),
-                _ => None,
-            };
-            //dlog!("charset {:?}", charset);
         }
 
-        let mut unicode_map = get_unicode_map(doc, font);
+        let mut unicode_map = get_unicode_map(doc, font).ok();
 
         let mut encoding_table = None;
         match encoding {
             Some(Object::Name(encoding_name)) => {
                 dlog!("encoding {:?}", pdf_to_utf8(encoding_name));
-                encoding_table = Some(encoding_to_unicode_table(encoding_name));
+                encoding_table =
+                    Some(encoding_to_unicode_table(encoding_name)?);
             }
             Some(Object::Dictionary(encoding)) => {
                 //dlog!("Encoding {:?}", encoding);
                 let mut table = if let Some(base_encoding) =
                     maybe_get_name(doc, encoding, b"BaseEncoding")
                 {
-                    dlog!("BaseEncoding {:?}", base_encoding);
-                    encoding_to_unicode_table(base_encoding)
+                    encoding_to_unicode_table(base_encoding)?
                 } else {
                     Vec::from(PDF_DOC_ENCODING)
                 };
@@ -492,6 +493,7 @@ impl<'a> PdfSimpleFont<'a> {
                 if let Some(differences) = differences {
                     dlog!("Differences");
                     let mut code = 0;
+
                     for o in differences {
                         let o = maybe_deref(doc, o);
                         match o {
@@ -509,31 +511,15 @@ impl<'a> PdfSimpleFont<'a> {
                                     if let Some(ref mut unicode_map) =
                                         unicode_map
                                     {
-                                        let be = [unicode];
                                         match unicode_map.entry(code as u32) {
                                             // If there's a unicode table entry missing use one based on the name
                                             Entry::Vacant(v) => {
-                                                v.insert(
-                                                    String::from_utf16(&be)
-                                                        .unwrap(),
-                                                );
+                                                let be = [unicode];
+                                                let s =
+                                                    String::from_utf16(&be)?;
+                                                v.insert(s);
                                             }
-                                            Entry::Occupied(e) => {
-                                                if e.get()
-                                                    != &String::from_utf16(&be)
-                                                        .unwrap()
-                                                {
-                                                    let normal_match =
-                                                        e.get().nfkc().eq(
-                                                            String::from_utf16(
-                                                                &be,
-                                                            )
-                                                            .unwrap()
-                                                            .nfkc(),
-                                                        );
-                                                    println!("Unicode mismatch {} {} {:?} {:?} {:?}", normal_match, name, e.get(), String::from_utf16(&be), be);
-                                                }
-                                            }
+                                            Entry::Occupied(_) => {}
                                         }
                                     }
                                 } else {
@@ -550,55 +536,40 @@ impl<'a> PdfSimpleFont<'a> {
                                                     v.insert("".to_owned());
                                                 }
                                                 Entry::Occupied(_) => {
-                                                    panic!("unexpected entry in unicode map")
+                                                    Err(OutputError::Other(
+                                                      "unexpected entry in unicode map".into()
+                                                    ))?;
                                                 }
                                             }
                                         }
-                                        _ => {
-                                            println!("unknown glyph name '{}' for font {}", name, base_name);
-                                        }
+                                        _ => {}
                                     }
-                                }
-                                dlog!("{} = {} ({:?})", code, name, unicode);
-                                if let Some(ref mut unicode_map) = unicode_map {
-                                    // The unicode map might not have the code in it, but the code might
-                                    // not be used so we don't want to panic here.
-                                    // An example of this is the 'suppress' character in the TeX Latin Modern font.
-                                    // This shows up in https://arxiv.org/pdf/2405.01295v1.pdf
-                                    dlog!(
-                                        "{} {:?}",
-                                        code,
-                                        unicode_map.get(&(code as u32))
-                                    );
                                 }
                                 code += 1;
                             }
                             _ => {
-                                panic!("wrong type {:?}", o);
+                                Err(OutputError::Other(format!(
+                                    "Wrong type: {:?}",
+                                    0
+                                )))?;
                             }
                         }
                     }
                 }
-                let name = pdf_to_utf8(
-                    encoding.get(b"Type").unwrap().as_name().unwrap(),
-                );
-                dlog!("name: {}", name);
 
                 encoding_table = Some(table);
             }
             None => {
                 if let Some(type1_encoding) = type1_encoding {
                     let mut table = Vec::from(PDF_DOC_ENCODING);
-                    dlog!("type1encoding");
                     for (code, name) in type1_encoding {
                         let unicode =
                             glyphnames::name_to_unicode(&pdf_to_utf8(&name)?);
                         if let Some(unicode) = unicode {
                             table[code as usize] = unicode;
-                        } else {
-                            dlog!("unknown character {}", pdf_to_utf8(&name));
                         }
                     }
+
                     encoding_table = Some(table)
                 } else if subtype == "TrueType" {
                     encoding_table = Some(
@@ -606,17 +577,19 @@ impl<'a> PdfSimpleFont<'a> {
                             .iter()
                             .map(|x| {
                                 if let &Some(x) = x {
-                                    glyphnames::name_to_unicode(x).unwrap()
+                                    glyphnames::name_to_unicode(x).ok_or_else(
+                                        || OutputError::Other("TODO".into()),
+                                    )
                                 } else {
-                                    0
+                                    Ok(0)
                                 }
                             })
-                            .collect(),
+                            .collect::<error::Result<Vec<_>>>()?,
                     );
                 }
             }
             _ => {
-                panic!()
+                Err(OutputError::Other("TODO".into()))?;
             }
         }
 
@@ -628,7 +601,8 @@ impl<'a> PdfSimpleFont<'a> {
 
         Note: some PDFs include a descriptor but still don't include these entries */
 
-        // If we have widths prefer them over the core font widths. Needed for https://dkp.de/wp-content/uploads/parteitage/Sozialismusvorstellungen-der-DKP.pdf
+        // If we have widths prefer them over the core font widths.
+        // Needed for https://dkp.de/wp-content/uploads/parteitage/Sozialismusvorstellungen-der-DKP.pdf
         if let (Some(first_char), Some(last_char), Some(widths)) = (
             maybe_get::<i64>(doc, font, b"FirstChar"),
             maybe_get::<i64>(doc, font, b"LastChar"),
@@ -636,13 +610,6 @@ impl<'a> PdfSimpleFont<'a> {
         ) {
             // Some PDF's don't have these like fips-197.pdf
             let mut i: i64 = 0;
-            dlog!(
-                "first_char {:?}, last_char: {:?}, widths: {} {:?}",
-                first_char,
-                last_char,
-                widths.len(),
-                widths
-            );
 
             for w in widths {
                 width_map.insert((first_char + i) as CharCode, w);
@@ -653,9 +620,11 @@ impl<'a> PdfSimpleFont<'a> {
             for font_metrics in core_fonts::metrics().iter() {
                 if font_metrics.0 == base_name {
                     if let Some(ref encoding) = encoding_table {
-                        dlog!("has encoding");
                         for w in font_metrics.2 {
-                            let c = glyphnames::name_to_unicode(w.2).unwrap();
+                            let c = glyphnames::name_to_unicode(w.2)
+                                .ok_or_else(|| {
+                                    OutputError::Other("TODO".into())
+                                })?;
                             for (i, item) in encoding.iter().enumerate() {
                                 if *item == c {
                                     width_map.insert(i as CharCode, w.1);
@@ -669,15 +638,21 @@ impl<'a> PdfSimpleFont<'a> {
 
                         let mut table = vec![0; 256];
                         for w in font_metrics.2 {
-                            dlog!("{} {}", w.0, w.2);
                             // -1 is "not encoded"
                             if w.0 != -1 {
                                 table[w.0 as usize] = if base_name
                                     == "ZapfDingbats"
                                 {
-                                    zapfglyphnames::zapfdigbats_names_to_unicode(w.2).unwrap_or_else(|| panic!("bad name {:?}", w))
+                                    zapfglyphnames::zapfdigbats_names_to_unicode(w.2)
+                                        .ok_or_else(|| OutputError::Other(format!("bad name {:?}", w)))?
                                 } else {
-                                    glyphnames::name_to_unicode(w.2).unwrap()
+                                    glyphnames::name_to_unicode(w.2)
+                                        .ok_or_else(|| {
+                                            OutputError::Other(format!(
+                                                "bad name {:?}",
+                                                w
+                                            ))
+                                        })?
                                 }
                             }
                         }
@@ -695,13 +670,10 @@ impl<'a> PdfSimpleFont<'a> {
                     entries and embedding the font program in the PDF file."
 
                     Note: some PDFs include a descriptor but still don't include these entries */
-                    // assert!(maybe_get_obj(doc, font, b"FirstChar").is_none());
-                    // assert!(maybe_get_obj(doc, font, b"LastChar").is_none());
-                    // assert!(maybe_get_obj(doc, font, b"Widths").is_none());
                 }
             }
         } else {
-            panic!("no widths");
+            Err(OutputError::Other("no widths".into()))?;
         }
 
         let missing_width =
@@ -710,29 +682,29 @@ impl<'a> PdfSimpleFont<'a> {
         Ok(Self {
             doc,
             font,
-            widths: width_map,
-            encoding: encoding_table,
             missing_width,
             unicode_map,
+            widths: width_map,
+            encoding: encoding_table,
         })
     }
 
     #[allow(dead_code)]
-    fn get_type(&self) -> String {
+    fn get_type(&self) -> error::Result<String> {
         get_name_string(self.doc, self.font, b"Type")
     }
     #[allow(dead_code)]
-    fn get_basefont(&self) -> String {
+    fn get_basefont(&self) -> error::Result<String> {
         get_name_string(self.doc, self.font, b"BaseFont")
     }
     #[allow(dead_code)]
-    fn get_subtype(&self) -> String {
+    fn get_subtype(&self) -> error::Result<String> {
         get_name_string(self.doc, self.font, b"Subtype")
     }
     #[allow(dead_code)]
     fn get_widths(&self) -> Option<&Vec<Object>> {
         maybe_get_obj(self.doc, self.font, b"Widths")
-            .map(|widths| widths.as_array().expect("Widths should be an array"))
+            .and_then(|widths| widths.as_array().ok())
     }
     /* For type1: This entry is obsolescent and its use is no longer recommended. (See
      * implementation note 42 in Appendix H.) */
@@ -753,33 +725,26 @@ impl<'a> PdfSimpleFont<'a> {
 }
 
 impl<'a> PdfType3Font<'a> {
-    fn new(
-        doc: &'a Document,
-        font: &'a Dictionary,
-    ) -> error::Result<PdfType3Font<'a>> {
-        let unicode_map = get_unicode_map(doc, font);
+    fn new(doc: &'a Document, font: &'a Dictionary) -> error::Result<Self> {
+        let unicode_map = get_unicode_map(doc, font).ok();
         let encoding: Option<&Object> = get(doc, font, b"Encoding");
-
         let encoding_table;
         match encoding {
             Some(Object::Name(encoding_name)) => {
-                dlog!("encoding {:?}", pdf_to_utf8(encoding_name));
-                encoding_table = Some(encoding_to_unicode_table(encoding_name));
+                encoding_table =
+                    Some(encoding_to_unicode_table(encoding_name)?);
             }
             Some(Object::Dictionary(encoding)) => {
-                //dlog!("Encoding {:?}", encoding);
                 let mut table = if let Some(base_encoding) =
                     maybe_get_name(doc, encoding, b"BaseEncoding")
                 {
-                    dlog!("BaseEncoding {:?}", base_encoding);
-                    encoding_to_unicode_table(base_encoding)
+                    encoding_to_unicode_table(base_encoding)?
                 } else {
                     Vec::from(PDF_DOC_ENCODING)
                 };
                 let differences =
                     maybe_get_array(doc, encoding, b"Differences");
                 if let Some(differences) = differences {
-                    dlog!("Differences");
                     let mut code = 0;
                     for o in differences {
                         match o {
@@ -795,14 +760,6 @@ impl<'a> PdfType3Font<'a> {
                                 if let Some(unicode) = unicode {
                                     table[code as usize] = unicode;
                                 }
-                                dlog!("{} = {} ({:?})", code, name, unicode);
-                                if let Some(ref unicode_map) = unicode_map {
-                                    dlog!(
-                                        "{} {:?}",
-                                        code,
-                                        unicode_map.get(&(code as u32))
-                                    );
-                                }
                                 code += 1;
                             }
                             _ => {
@@ -810,12 +767,6 @@ impl<'a> PdfType3Font<'a> {
                             }
                         }
                     }
-                }
-                let name_encoded = encoding.get(b"Type");
-                if let Ok(Object::Name(name)) = name_encoded {
-                    dlog!("name: {}", pdf_to_utf8(name));
-                } else {
-                    dlog!("name not found");
                 }
 
                 encoding_table = Some(table);
@@ -828,31 +779,26 @@ impl<'a> PdfType3Font<'a> {
         let first_char: i64 = get(doc, font, b"FirstChar");
         let last_char: i64 = get(doc, font, b"LastChar");
         let widths: Vec<f64> = get(doc, font, b"Widths");
+        let max = widths.len() as i64;
 
         let mut width_map = HashMap::new();
 
-        let mut i = 0;
-        dlog!(
-            "first_char {:?}, last_char: {:?}, widths: {} {:?}",
-            first_char,
-            last_char,
-            widths.len(),
-            widths
-        );
-
-        for w in widths {
+        for (i, w) in widths.into_iter().enumerate() {
+            let i = i as i64;
             width_map.insert((first_char + i) as CharCode, w);
-            i += 1;
         }
-        // assert_eq!(first_char + i - 1, last_char);
 
-        Ok(Self {
-            doc,
-            font,
-            widths: width_map,
-            encoding: encoding_table,
-            unicode_map,
-        })
+        if (first_char + max - 1) == last_char {
+            Ok(Self {
+                doc,
+                font,
+                widths: width_map,
+                encoding: encoding_table,
+                unicode_map,
+            })
+        } else {
+            Err(OutputError::Other("TODO".into()))
+        }
     }
 }
 
@@ -865,6 +811,7 @@ struct PdfFontIter<'a> {
 
 impl<'a> Iterator for PdfFontIter<'a> {
     type Item = (CharCode, u8);
+
     fn next(&mut self) -> Option<(CharCode, u8)> {
         self.font.next_char(&mut self.i)
     }
@@ -873,12 +820,7 @@ impl<'a> Iterator for PdfFontIter<'a> {
 trait PdfFont: Debug {
     fn get_width(&self, id: CharCode) -> f64;
     fn next_char(&self, iter: &mut Iter<u8>) -> Option<(CharCode, u8)>;
-    fn decode_char(&self, char: CharCode) -> String;
-
-    /*fn char_codes<'a>(&'a self, chars: &'a [u8]) -> PdfFontIter {
-        let p = self;
-        PdfFontIter{i: chars.iter(), font: p as &PdfFont}
-    }*/
+    fn decode_char(&self, char: CharCode) -> error::Result<String>;
 }
 
 impl<'a> dyn PdfFont + 'a {
@@ -887,13 +829,6 @@ impl<'a> dyn PdfFont + 'a {
             i: chars.iter(),
             font: self,
         }
-    }
-    fn decode(&self, chars: &[u8]) -> String {
-        let strings = self
-            .char_codes(chars)
-            .map(|x| self.decode_char(x.0))
-            .collect::<Vec<_>>();
-        strings.join("")
     }
 }
 
@@ -912,28 +847,26 @@ impl<'a> PdfFont for PdfSimpleFont<'a> {
     fn next_char(&self, iter: &mut Iter<u8>) -> Option<(CharCode, u8)> {
         iter.next().map(|x| (*x as CharCode, 1))
     }
-    fn decode_char(&self, char: CharCode) -> String {
+
+    fn decode_char(&self, char: CharCode) -> error::Result<String> {
         let slice = [char as u8];
         if let Some(ref unicode_map) = self.unicode_map {
             let s = unicode_map.get(&char);
             let s = match s {
                 None => {
-                    println!(
-                        "missing char {:?} in unicode map {:?} for {:?}",
-                        char, unicode_map, self.font
-                    );
                     // some pdf's like http://arxiv.org/pdf/2312.00064v1 are missing entries in their unicode map but do have
                     // entries in the encoding.
-                    let encoding = self
-                        .encoding
-                        .as_ref()
-                        .map(|x| &x[..])
-                        .expect("missing unicode map and encoding");
-                    let s = to_utf8(encoding, &slice);
-                    println!("falling back to encoding {} -> {:?}", char, s);
-                    s
+                    let encoding =
+                        self.encoding.as_ref().map(|x| &x[..]).ok_or_else(
+                            || {
+                                OutputError::Other(String::from(
+                                    "missing unicode map and encoding",
+                                ))
+                            },
+                        )?;
+                    Ok(to_utf8(encoding, &slice)?)
                 }
-                Some(s) => s.clone(),
+                Some(s) => Ok(s.clone()),
             };
             return s;
         }
@@ -971,26 +904,26 @@ impl<'a> PdfFont for PdfType3Font<'a> {
     fn next_char(&self, iter: &mut Iter<u8>) -> Option<(CharCode, u8)> {
         iter.next().map(|x| (*x as CharCode, 1))
     }
-    fn decode_char(&self, char: CharCode) -> String {
+    fn decode_char(&self, char: CharCode) -> error::Result<String> {
         let slice = [char as u8];
         if let Some(ref unicode_map) = self.unicode_map {
-            let s = unicode_map.get(&char);
-            let s = match s {
-                None => {
-                    panic!("missing char {:?} in map {:?}", char, unicode_map)
-                }
-                Some(s) => s.clone(),
-            };
-            return s;
-        }
-        let encoding = self
-            .encoding
-            .as_ref()
-            .map(|x| &x[..])
-            .unwrap_or(PDF_DOC_ENCODING);
-        //dlog!("char_code {:?} {:?}", char, self.encoding);
+            let s = unicode_map.get(&char).ok_or_else(|| {
+                OutputError::Other(format!(
+                    "missing char {:?} in map {:?}",
+                    char, unicode_map
+                ))
+            })?;
 
-        to_utf8(encoding, &slice)
+            Ok(s.into())
+        } else {
+            let encoding = self
+                .encoding
+                .as_ref()
+                .map(|x| &x[..])
+                .unwrap_or(PDF_DOC_ENCODING);
+
+            to_utf8(encoding, &slice)
+        }
     }
 }
 
@@ -1014,16 +947,14 @@ struct PdfCidFont<'a> {
 fn get_unicode_map<'a>(
     doc: &'a Document,
     font: &'a Dictionary,
-) -> Option<HashMap<u32, String>> {
+) -> error::Result<HashMap<u32, String>> {
     let to_unicode = maybe_get_obj(doc, font, b"ToUnicode");
-    dlog!("ToUnicode: {:?}", to_unicode);
     let mut unicode_map = None;
     match to_unicode {
         Some(Object::Stream(stream)) => {
             let contents = get_contents(stream);
-            dlog!("Stream: {}", String::from_utf8(contents.clone()).unwrap());
 
-            let cmap = adobe_cmap_parser::get_unicode_map(&contents).unwrap();
+            let cmap = adobe_cmap_parser::get_unicode_map(&contents)?;
             let mut unicode = HashMap::new();
             // "It must use the beginbfchar, endbfchar, beginbfrange, and endbfrange operators to
             // define the mapping from character codes to Unicode character sequences expressed in
@@ -1041,26 +972,28 @@ fn get_unicode_map<'a>(
                     // we ignore them so we don't an error from from_utt16
                     continue;
                 }
-                let s = String::from_utf16(&be).unwrap();
+                let s = String::from_utf16(&be)?;
 
                 unicode.insert(k, s);
             }
             unicode_map = Some(unicode);
-
-            dlog!("map: {:?}", unicode_map);
         }
         None => {}
         Some(Object::Name(name)) => {
-            let name = pdf_to_utf8(name).ok()?;
+            let name = pdf_to_utf8(name)?;
             if name != "Identity-H" {
-                todo!("unsupported ToUnicode name: {:?}", name);
+                Err(OutputError::Other(format!(
+                    "unsupported ToUnicode name: {:?}",
+                    name
+                )))?
             }
         }
-        _ => {
-            panic!("unsupported cmap {:?}", to_unicode)
-        }
+        _ => Err(OutputError::Other(format!(
+            "unsupported cmap {:?}",
+            to_unicode
+        )))?,
     }
-    unicode_map
+    unicode_map.ok_or_else(|| OutputError::Other("TODO".into()))
 }
 
 impl<'a> PdfCidFont<'a> {
@@ -1106,7 +1039,7 @@ impl<'a> PdfCidFont<'a> {
         // We should also look inside the truetype data to see if there's a cmap table. It will help us convert as well.
         // This won't work if the cmap has been subsetted. A better approach might be to hash glyph contents and use that against
         // a global library of glyph hashes
-        let unicode_map = get_unicode_map(doc, font);
+        let unicode_map = get_unicode_map(doc, font).ok();
         let font_dict =
             maybe_get_obj(doc, ciddict, b"FontDescriptor").expect("required");
         let _f = font_dict.as_dict().expect("must be dict");
@@ -1180,18 +1113,12 @@ impl<'a> PdfFont for PdfCidFont<'a> {
         }
         None
     }
-    fn decode_char(&self, char: CharCode) -> String {
+    fn decode_char(&self, char: CharCode) -> error::Result<String> {
         let s = self.to_unicode.as_ref().and_then(|x| x.get(&char));
         if let Some(s) = s {
-            s.clone()
+            Ok(s.clone())
         } else {
-            dlog!(
-                "Unknown character {:?} in {:?} {:?}",
-                char,
-                self.font,
-                self.to_unicode
-            );
-            "".to_string()
+            Ok(String::new())
         }
     }
 }
@@ -1381,13 +1308,9 @@ fn show_text(
     _tlm: &Transform,
     _flip_ctm: &Transform,
     output: &mut dyn OutputDev,
-) -> Result<(), OutputError> {
+) -> error::Result<()> {
     let ts = &mut gs.ts;
     let font = ts.font.as_ref().unwrap();
-    //let encoding = font.encoding.as_ref().map(|x| &x[..]).unwrap_or(&PDFDocEncoding);
-    dlog!("{:?}", font.decode(s));
-    dlog!("{:?}", font.decode(s).as_bytes());
-    dlog!("{:?}", s);
     output.begin_word()?;
 
     for (c, length) in font.char_codes(s) {
@@ -1424,27 +1347,19 @@ fn show_text(
             w0,
             spacing,
             ts.font_size,
-            &font.decode_char(c),
+            &font.decode_char(c)?,
         )?;
+
         let tj = 0.;
         let ty = 0.;
         let tx = ts.horizontal_scaling
             * ((w0 - tj / 1000.) * ts.font_size + spacing);
-        dlog!(
-            "horizontal {} adjust {} {} {} {}",
-            ts.horizontal_scaling,
-            tx,
-            w0,
-            ts.font_size,
-            spacing
-        );
-        // dlog!("w0: {}, tx: {}", w0, tx);
         ts.tm = ts
             .tm
             .pre_transform(&Transform2D::create_translation(tx, ty));
         let _trm = ts.tm.pre_transform(&gs.ctm);
-        //dlog!("post pos: {:?}", trm);
     }
+
     output.end_word()?;
     Ok(())
 }
@@ -2722,44 +2637,49 @@ pub fn output_doc(
     output: &mut dyn OutputDev,
 ) -> Result<(), OutputError> {
     if doc.is_encrypted() {
-        eprintln!("Encrypted documents must be decrypted with a password using {{extract_text|extract_text_from_mem|output_doc}}_encrypted");
+        let msg = "Encrypted documents must be decrypted with a password \
+            using {{extract_text|extract_text_from_mem|output_doc}}_encrypted"
+            .into();
+        Err(OutputError::Other(msg))
+    } else {
+        let empty_resources = &Dictionary::new();
+
+        let pages = doc.get_pages();
+        for dict in pages {
+            let page_num = dict.0;
+            let page_dict = doc.get_object(dict.1).unwrap().as_dict().unwrap();
+            dlog!("page {} {:?}", page_num, page_dict);
+            // XXX: Some pdfs lack a Resources directory
+            let resources = get_inherited(doc, page_dict, b"Resources")
+                .unwrap_or(empty_resources);
+            dlog!("resources {:?}", resources);
+
+            // pdfium searches up the page tree for MediaBoxes as needed
+            let media_box: Vec<f64> =
+                get_inherited(doc, page_dict, b"MediaBox").expect("MediaBox");
+            let media_box = MediaBox {
+                llx: media_box[0],
+                lly: media_box[1],
+                urx: media_box[2],
+                ury: media_box[3],
+            };
+
+            let art_box = get::<Option<Vec<f64>>>(doc, page_dict, b"ArtBox")
+                .map(|x| (x[0], x[1], x[2], x[3]));
+
+            output.begin_page(page_num, &media_box, art_box)?;
+
+            Processor::process_stream(
+                doc,
+                doc.get_page_content(dict.1).unwrap(),
+                resources,
+                &media_box,
+                output,
+            )?;
+
+            output.end_page()?;
+        }
+
+        Ok(())
     }
-    let empty_resources = &Dictionary::new();
-
-    let pages = doc.get_pages();
-    for dict in pages {
-        let page_num = dict.0;
-        let page_dict = doc.get_object(dict.1).unwrap().as_dict().unwrap();
-        dlog!("page {} {:?}", page_num, page_dict);
-        // XXX: Some pdfs lack a Resources directory
-        let resources = get_inherited(doc, page_dict, b"Resources")
-            .unwrap_or(empty_resources);
-        dlog!("resources {:?}", resources);
-
-        // pdfium searches up the page tree for MediaBoxes as needed
-        let media_box: Vec<f64> =
-            get_inherited(doc, page_dict, b"MediaBox").expect("MediaBox");
-        let media_box = MediaBox {
-            llx: media_box[0],
-            lly: media_box[1],
-            urx: media_box[2],
-            ury: media_box[3],
-        };
-
-        let art_box = get::<Option<Vec<f64>>>(doc, page_dict, b"ArtBox")
-            .map(|x| (x[0], x[1], x[2], x[3]));
-
-        output.begin_page(page_num, &media_box, art_box)?;
-
-        Processor::process_stream(
-            doc,
-            doc.get_page_content(dict.1).unwrap(),
-            resources,
-            &media_box,
-            output,
-        )?;
-
-        output.end_page()?;
-    }
-    Ok(())
 }
