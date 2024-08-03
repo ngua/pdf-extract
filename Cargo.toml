@@ -2,7 +2,7 @@
 authors = ["Jeff Muizelaar <jmuizelaar@mozilla.com>"]
 description = "A library to extract content from pdfs"
 documentation = "https://docs.rs/crate/pdf-extract/"
-edition = "2018"
+edition = "2021"
 keywords = ["pdf2text", "text", "pdf", "pdf2txt"]
 license = "MIT"
 name = "pdf-extract"
@@ -19,6 +19,7 @@ encoding_rs = "0.8.34"
 euclid = "0.20.5"
 lopdf = {version = "0.32", default-features = false, features = ["nom_parser"]}
 postscript = "0.14"
+thiserror = "1.0"
 type1-encoding-parser = "0.1.0"
 unicode-normalization = "0.1.19"
 

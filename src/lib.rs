@@ -1493,6 +1493,7 @@ impl<'a> Processor<'a> {
                 font_size: std::f64::NAN,
                 character_spacing: 0.,
                 word_spacing: 0.,
+                #[allow(clippy::eq_op)]
                 horizontal_scaling: 100. / 100.,
                 leading: 0.,
                 rise: 0.,
