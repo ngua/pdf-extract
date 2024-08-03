@@ -17,6 +17,12 @@ pub enum OutputError {
 /// Result type for this crate
 pub type Result<T> = std::result::Result<T, OutputError>;
 
+impl From<String> for OutputError {
+    fn from(e: String) -> Self {
+        OutputError::Other(e.into())
+    }
+}
+
 impl From<&str> for OutputError {
     fn from(e: &str) -> Self {
         OutputError::Other(e.into())
