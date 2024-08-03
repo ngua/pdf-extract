@@ -1,20 +1,6 @@
-extern crate lopdf;
-
-use std::fmt::{Debug, Formatter};
-
-use adobe_cmap_parser::{ByteMapping, CIDRange, CodeRange};
-use encoding_rs::UTF_16BE;
-use euclid::*;
-use lopdf::content::Content;
-use lopdf::encryption::DecryptionError;
-use lopdf::*;
-extern crate adobe_cmap_parser;
-extern crate encoding_rs;
-extern crate euclid;
-extern crate type1_encoding_parser;
-extern crate unicode_normalization;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -22,7 +8,12 @@ use std::result::Result;
 use std::slice::Iter;
 use std::{fmt, str};
 
-use euclid::vec2;
+use adobe_cmap_parser::{ByteMapping, CIDRange, CodeRange};
+use encoding_rs::UTF_16BE;
+use euclid::{vec2, *};
+use lopdf::content::Content;
+use lopdf::encryption::DecryptionError;
+use lopdf::*;
 use unicode_normalization::UnicodeNormalization;
 mod core_fonts;
 mod encodings;
@@ -302,9 +293,9 @@ impl<'a, T: FromObj<'a>> FromObj<'a> for [T; 3] {
 
 impl<'a> FromObj<'a> for f64 {
     fn from_obj(_doc: &Document, obj: &Object) -> Option<Self> {
-        match obj {
-            &Object::Integer(i) => Some(i as f64),
-            &Object::Real(f) => Some(f.into()),
+        match *obj {
+            Object::Integer(i) => Some(i as f64),
+            Object::Real(f) => Some(f.into()),
             _ => None,
         }
     }
@@ -312,8 +303,8 @@ impl<'a> FromObj<'a> for f64 {
 
 impl<'a> FromObj<'a> for i64 {
     fn from_obj(_doc: &Document, obj: &Object) -> Option<Self> {
-        match obj {
-            &Object::Integer(i) => Some(i),
+        match *obj {
+            Object::Integer(i) => Some(i),
             _ => None,
         }
     }
@@ -405,6 +396,7 @@ struct PdfSimpleFont<'a> {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct PdfType3Font<'a> {
     font: &'a Dictionary,
     doc: &'a Document,
@@ -429,23 +421,23 @@ fn make_font<'a>(
 }
 
 fn is_core_font(name: &str) -> bool {
-    match name {
+    matches!(
+        name,
         "Courier-Bold"
-        | "Courier-BoldOblique"
-        | "Courier-Oblique"
-        | "Courier"
-        | "Helvetica-Bold"
-        | "Helvetica-BoldOblique"
-        | "Helvetica-Oblique"
-        | "Helvetica"
-        | "Symbol"
-        | "Times-Bold"
-        | "Times-BoldItalic"
-        | "Times-Italic"
-        | "Times-Roman"
-        | "ZapfDingbats" => true,
-        _ => false,
-    }
+            | "Courier-BoldOblique"
+            | "Courier-Oblique"
+            | "Courier"
+            | "Helvetica-Bold"
+            | "Helvetica-BoldOblique"
+            | "Helvetica-Oblique"
+            | "Helvetica"
+            | "Symbol"
+            | "Times-Bold"
+            | "Times-BoldItalic"
+            | "Times-Italic"
+            | "Times-Roman"
+            | "ZapfDingbats"
+    )
 }
 
 fn encoding_to_unicode_table(name: &[u8]) -> Vec<u16> {
@@ -620,7 +612,7 @@ impl<'a> PdfSimpleFont<'a> {
                                                 Entry::Vacant(v) => {
                                                     v.insert("".to_owned());
                                                 }
-                                                Entry::Occupied(e) => {
+                                                Entry::Occupied(_) => {
                                                     panic!("unexpected entry in unicode map")
                                                 }
                                             }
@@ -727,8 +719,8 @@ impl<'a> PdfSimpleFont<'a> {
                         dlog!("has encoding");
                         for w in font_metrics.2 {
                             let c = glyphnames::name_to_unicode(w.2).unwrap();
-                            for i in 0..encoding.len() {
-                                if encoding[i] == c {
+                            for (i, item) in encoding.iter().enumerate() {
+                                if *item == c {
                                     width_map.insert(i as CharCode, w.1);
                                 }
                             }
@@ -1183,28 +1175,21 @@ impl<'a> PdfCIDFont<'a> {
         // This won't work if the cmap has been subsetted. A better approach might be to hash glyph contents and use that against
         // a global library of glyph hashes
         let unicode_map = get_unicode_map(doc, font);
-
-        dlog!("descendents {:?} {:?}", descendants, ciddict);
-
         let font_dict =
             maybe_get_obj(doc, ciddict, b"FontDescriptor").expect("required");
-        dlog!("{:?}", font_dict);
         let _f = font_dict.as_dict().expect("must be dict");
         let default_width =
             get::<Option<i64>>(doc, ciddict, b"DW").unwrap_or(1000);
         let w: Option<Vec<&Object>> = get(doc, ciddict, b"W");
-        dlog!("widths {:?}", w);
         let mut widths = HashMap::new();
         let mut i = 0;
         if let Some(w) = w {
             while i < w.len() {
                 if let Object::Array(wa) = w[i + 1] {
                     let cid = w[i].as_i64().expect("id should be num");
-                    let mut j = 0;
-                    dlog!("wa: {:?} -> {:?}", cid, wa);
-                    for w in wa {
+                    for (j, w) in wa.iter().enumerate() {
+                        let j = j as i64;
                         widths.insert((cid + j) as CharCode, as_num(w));
-                        j += 1;
                     }
                     i += 2;
                 } else {
@@ -1239,15 +1224,7 @@ impl<'a> PdfFont for PdfCIDFont<'a> {
             dlog!("missing width for {} falling back to default_width", id);
             self.default_width.unwrap()
         }
-    } /*
-      fn decode(&self, chars: &[u8]) -> String {
-          self.char_codes(chars);
-
-          //let utf16 = Vec::new();
-
-          let encoding = self.encoding.as_ref().map(|x| &x[..]).unwrap_or(&PDFDocEncoding);
-          to_utf8(encoding, chars)
-      }*/
+    }
 
     fn next_char(&self, iter: &mut Iter<u8>) -> Option<(CharCode, u8)> {
         let mut c = *iter.next()? as u32;
@@ -1312,6 +1289,7 @@ impl<'a> fmt::Debug for PdfFontDescriptor<'a> {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct Type0Func {
     domain: Vec<f64>,
     range: Vec<f64>,
@@ -1343,6 +1321,7 @@ impl Type0Func {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct Type2Func {
     c0: Option<Vec<f64>>,
     c1: Option<Vec<f64>>,
@@ -1351,7 +1330,9 @@ struct Type2Func {
 
 #[derive(Clone, Debug)]
 enum Function {
+    #[allow(dead_code)]
     Type0(Type0Func),
+    #[allow(dead_code)]
     Type2(Type2Func),
     #[allow(dead_code)]
     Type3,
@@ -1417,9 +1398,9 @@ impl Function {
 }
 
 fn as_num(o: &Object) -> f64 {
-    match o {
-        &Object::Integer(i) => i as f64,
-        &Object::Real(f) => f.into(),
+    match *o {
+        Object::Integer(i) => i as f64,
+        Object::Real(f) => f.into(),
         _ => {
             panic!("not a number")
         }
@@ -1597,10 +1578,10 @@ impl Path {
         Path { ops: Vec::new() }
     }
     fn current_point(&self) -> (f64, f64) {
-        match self.ops.last().unwrap() {
-            &PathOp::MoveTo(x, y) => (x, y),
-            &PathOp::LineTo(x, y) => (x, y),
-            &PathOp::CurveTo(_, _, _, _, x, y) => (x, y),
+        match *self.ops.last().unwrap() {
+            PathOp::MoveTo(x, y) => (x, y),
+            PathOp::LineTo(x, y) => (x, y),
+            PathOp::CurveTo(_, _, _, _, x, y) => (x, y),
             _ => {
                 panic!()
             }
@@ -1609,6 +1590,7 @@ impl Path {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct CalGray {
     white_point: [f64; 3],
     black_point: Option<[f64; 3]>,
@@ -1616,6 +1598,7 @@ pub struct CalGray {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct CalRGB {
     white_point: [f64; 3],
     black_point: Option<[f64; 3]>,
@@ -1624,6 +1607,7 @@ pub struct CalRGB {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Lab {
     white_point: [f64; 3],
     black_point: Option<[f64; 3]>,
@@ -1642,6 +1626,7 @@ pub enum AlternateColorSpace {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Separation {
     name: String,
     alternate_space: AlternateColorSpace,
@@ -1853,25 +1838,19 @@ struct Processor<'a> {
 }
 
 impl<'a> Processor<'a> {
-    fn new() -> Processor<'a> {
-        Processor { _none: PhantomData }
-    }
-
     fn process_stream(
-        &mut self,
         doc: &'a Document,
         content: Vec<u8>,
         resources: &'a Dictionary,
         media_box: &MediaBox,
         output: &mut dyn OutputDev,
-        page_num: u32,
     ) -> Result<(), OutputError> {
         let content = Content::decode(&content).unwrap();
         let mut font_table = HashMap::new();
         let mut gs: GraphicsState = GraphicsState {
             ts: TextState {
                 font: None,
-                font_size: std::f64::NAN,
+                font_size: f64::NAN,
                 character_spacing: 0.,
                 word_spacing: 0.,
                 #[allow(clippy::eq_op)]
@@ -2231,8 +2210,8 @@ impl<'a> Processor<'a> {
                         .and_then(|n| n.as_dict().ok())
                         .unwrap_or(resources);
                     let contents = get_contents(xf);
-                    self.process_stream(
-                        doc, contents, resources, media_box, output, page_num,
+                    Self::process_stream(
+                        doc, contents, resources, media_box, output,
                     )?;
                 }
                 _ => {
@@ -2520,14 +2499,14 @@ impl<'a> OutputDev for SVGOutput<'a> {
         }*/
         let mut d = Vec::new();
         for op in &path.ops {
-            match op {
-                &PathOp::MoveTo(x, y) => d.push(format!("M{} {}", x, y)),
-                &PathOp::LineTo(x, y) => d.push(format!("L{} {}", x, y)),
-                &PathOp::CurveTo(x1, y1, x2, y2, x, y) => {
+            match *op {
+                PathOp::MoveTo(x, y) => d.push(format!("M{} {}", x, y)),
+                PathOp::LineTo(x, y) => d.push(format!("L{} {}", x, y)),
+                PathOp::CurveTo(x1, y1, x2, y2, x, y) => {
                     d.push(format!("C{} {} {} {} {} {}", x1, y1, x2, y2, x, y))
                 }
-                &PathOp::Close => d.push("Z".to_string()),
-                &PathOp::Rect(x, y, width, height) => {
+                PathOp::Close => d.push("Z".to_string()),
+                PathOp::Rect(x, y, width, height) => {
                     d.push(format!("M{} {}", x, y));
                     d.push(format!("L{} {}", x + width, y));
                     d.push(format!("L{} {}", x + width, y + height));
@@ -2814,7 +2793,6 @@ pub fn output_doc(
     let empty_resources = &Dictionary::new();
 
     let pages = doc.get_pages();
-    let mut p = Processor::new();
     for dict in pages {
         let page_num = dict.0;
         let page_dict = doc.get_object(dict.1).unwrap().as_dict().unwrap();
@@ -2839,13 +2817,12 @@ pub fn output_doc(
 
         output.begin_page(page_num, &media_box, art_box)?;
 
-        p.process_stream(
+        Processor::process_stream(
             doc,
             doc.get_page_content(dict.1).unwrap(),
             resources,
             &media_box,
             output,
-            page_num,
         )?;
 
         output.end_page()?;
