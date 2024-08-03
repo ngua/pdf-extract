@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use std::fs::File;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -15,95 +15,25 @@ use lopdf::content::Content;
 use lopdf::encryption::DecryptionError;
 use lopdf::*;
 use unicode_normalization::UnicodeNormalization;
+
+use crate::error::OutputError;
+
 mod core_fonts;
 mod encodings;
+mod error;
 mod glyphnames;
 mod zapfglyphnames;
 
 pub struct Space;
 pub type Transform = Transform2D<f64, Space, Space>;
 
-#[derive(Debug)]
-pub enum OutputError {
-    FormatError(std::fmt::Error),
-    IoError(std::io::Error),
-    PdfError(lopdf::Error),
-}
-
-impl std::fmt::Display for OutputError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        match self {
-            OutputError::FormatError(e) => write!(f, "Formating error: {}", e),
-            OutputError::IoError(e) => write!(f, "IO error: {}", e),
-            OutputError::PdfError(e) => write!(f, "PDF error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for OutputError {}
-
-impl From<std::fmt::Error> for OutputError {
-    fn from(e: std::fmt::Error) -> Self {
-        OutputError::FormatError(e)
-    }
-}
-
-impl From<std::io::Error> for OutputError {
-    fn from(e: std::io::Error) -> Self {
-        OutputError::IoError(e)
-    }
-}
-
-impl From<lopdf::Error> for OutputError {
-    fn from(e: lopdf::Error) -> Self {
-        OutputError::PdfError(e)
-    }
-}
-
 macro_rules! dlog {
     ($($e:expr),*) => { {$(let _ = $e;)*} }
     //($($t:tt)*) => { println!($($t)*) }
 }
 
-fn get_info(doc: &Document) -> Option<&Dictionary> {
-    if let Ok(Object::Reference(id)) = doc.trailer.get(b"Info") {
-        if let Ok(Object::Dictionary(info)) = doc.get_object(*id) {
-            return Some(info);
-        }
-    }
-    None
-}
-
-fn get_catalog(doc: &Document) -> &Dictionary {
-    if let Object::Reference(id) = doc.trailer.get(b"Root").unwrap() {
-        if let Ok(Object::Dictionary(catalog)) = doc.get_object(*id) {
-            return catalog;
-        }
-    }
-    panic!();
-}
-
-fn get_pages(doc: &Document) -> &Dictionary {
-    let catalog = get_catalog(doc);
-    match catalog.get(b"Pages").unwrap() {
-        Object::Reference(id) => match doc.get_object(*id) {
-            Ok(Object::Dictionary(pages)) => {
-                return pages;
-            }
-            other => {
-                dlog!("pages: {:?}", other)
-            }
-        },
-        other => {
-            dlog!("pages: {:?}", other)
-        }
-    }
-    dlog!("catalog {:?}", catalog);
-    panic!();
-}
-
 #[allow(non_upper_case_globals)]
-const PDFDocEncoding: &[u16] = &[
+const PDF_DOC_ENCODING: &[u16] = &[
     0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008,
     0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x000e, 0x000f, 0x0010, 0x0011,
     0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017, 0x02d8, 0x02c7, 0x02c6,
@@ -135,26 +65,29 @@ const PDFDocEncoding: &[u16] = &[
     0x00fc, 0x00fd, 0x00fe, 0x00ff,
 ];
 
-fn pdf_to_utf8(s: &[u8]) -> String {
-    if s.len() > 2 && s[0] == 0xfe && s[1] == 0xff {
-        return UTF_16BE
+fn pdf_to_utf8(s: &[u8]) -> error::Result<String> {
+    let s = if s.len() > 2 && s[0] == 0xfe && s[1] == 0xff {
+        UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&s[2..])
-            .unwrap()
-            .to_string();
+            .ok_or_else(|| OutputError::Other(String::from("")))?
+            .to_string()
     } else {
         let r: Vec<u8> = s
             .iter()
             .copied()
             .flat_map(|x| {
-                let k = PDFDocEncoding[x as usize];
+                let k = PDF_DOC_ENCODING[x as usize];
                 vec![(k >> 8) as u8, k as u8].into_iter()
             })
             .collect();
-        return UTF_16BE
+
+        UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&r)
-            .unwrap()
-            .to_string();
-    }
+            .ok_or_else(|| OutputError::Other(String::from("")))?
+            .to_string()
+    };
+
+    Ok(s)
 }
 
 fn to_utf8(encoding: &[u16], s: &[u8]) -> String {
@@ -356,6 +289,7 @@ fn get_name_string<'a>(
             .as_name()
             .expect("name"),
     )
+    .unwrap()
 }
 
 #[allow(dead_code)]
@@ -366,7 +300,7 @@ fn maybe_get_name_string<'a>(
 ) -> Option<String> {
     maybe_get_obj(doc, dict, key)
         .and_then(|n| n.as_name().ok())
-        .map(pdf_to_utf8)
+        .map(|x| pdf_to_utf8(x).unwrap())
 }
 
 fn maybe_get_name<'a>(
@@ -408,15 +342,15 @@ struct PdfType3Font<'a> {
 fn make_font<'a>(
     doc: &'a Document,
     font: &'a Dictionary,
-) -> Rc<dyn PdfFont + 'a> {
+) -> error::Result<Rc<dyn PdfFont + 'a>> {
     let subtype = get_name_string(doc, font, b"Subtype");
     dlog!("MakeFont({})", subtype);
     if subtype == "Type0" {
-        Rc::new(PdfCIDFont::new(doc, font))
+        Ok(Rc::new(PdfCidFont::new(doc, font)?))
     } else if subtype == "Type3" {
-        Rc::new(PdfType3Font::new(doc, font))
+        Ok(Rc::new(PdfType3Font::new(doc, font)?))
     } else {
-        Rc::new(PdfSimpleFont::new(doc, font))
+        Ok(Rc::new(PdfSimpleFont::new(doc, font)?))
     }
 }
 
@@ -467,7 +401,10 @@ fn encoding_to_unicode_table(name: &[u8]) -> Vec<u16> {
     described in Section 5.5.5, “Character Encoding.”
 */
 impl<'a> PdfSimpleFont<'a> {
-    fn new(doc: &'a Document, font: &'a Dictionary) -> PdfSimpleFont<'a> {
+    fn new(
+        doc: &'a Document,
+        font: &'a Dictionary,
+    ) -> error::Result<PdfSimpleFont<'a>> {
         let base_name = get_name_string(doc, font, b"BaseFont");
         let subtype = get_name_string(doc, font, b"Subtype");
 
@@ -548,7 +485,7 @@ impl<'a> PdfSimpleFont<'a> {
                     dlog!("BaseEncoding {:?}", base_encoding);
                     encoding_to_unicode_table(base_encoding)
                 } else {
-                    Vec::from(PDFDocEncoding)
+                    Vec::from(PDF_DOC_ENCODING)
                 };
                 let differences =
                     maybe_get_array(doc, encoding, b"Differences");
@@ -562,7 +499,7 @@ impl<'a> PdfSimpleFont<'a> {
                                 code = i;
                             }
                             Object::Name(n) => {
-                                let name = pdf_to_utf8(n);
+                                let name = pdf_to_utf8(n)?;
                                 // XXX: names of Type1 fonts can map to arbitrary strings instead of real
                                 // unicode names, so we should probably handle this differently
                                 let unicode =
@@ -651,11 +588,11 @@ impl<'a> PdfSimpleFont<'a> {
             }
             None => {
                 if let Some(type1_encoding) = type1_encoding {
-                    let mut table = Vec::from(PDFDocEncoding);
+                    let mut table = Vec::from(PDF_DOC_ENCODING);
                     dlog!("type1encoding");
                     for (code, name) in type1_encoding {
                         let unicode =
-                            glyphnames::name_to_unicode(&pdf_to_utf8(&name));
+                            glyphnames::name_to_unicode(&pdf_to_utf8(&name)?);
                         if let Some(unicode) = unicode {
                             table[code as usize] = unicode;
                         } else {
@@ -769,14 +706,15 @@ impl<'a> PdfSimpleFont<'a> {
 
         let missing_width =
             get::<Option<f64>>(doc, font, b"MissingWidth").unwrap_or(0.);
-        PdfSimpleFont {
+
+        Ok(Self {
             doc,
             font,
             widths: width_map,
             encoding: encoding_table,
             missing_width,
             unicode_map,
-        }
+        })
     }
 
     #[allow(dead_code)]
@@ -815,7 +753,10 @@ impl<'a> PdfSimpleFont<'a> {
 }
 
 impl<'a> PdfType3Font<'a> {
-    fn new(doc: &'a Document, font: &'a Dictionary) -> PdfType3Font<'a> {
+    fn new(
+        doc: &'a Document,
+        font: &'a Dictionary,
+    ) -> error::Result<PdfType3Font<'a>> {
         let unicode_map = get_unicode_map(doc, font);
         let encoding: Option<&Object> = get(doc, font, b"Encoding");
 
@@ -833,7 +774,7 @@ impl<'a> PdfType3Font<'a> {
                     dlog!("BaseEncoding {:?}", base_encoding);
                     encoding_to_unicode_table(base_encoding)
                 } else {
-                    Vec::from(PDFDocEncoding)
+                    Vec::from(PDF_DOC_ENCODING)
                 };
                 let differences =
                     maybe_get_array(doc, encoding, b"Differences");
@@ -850,7 +791,7 @@ impl<'a> PdfType3Font<'a> {
                                 // XXX: names of Type1 fonts can map to arbitrary strings instead of real
                                 // unicode names, so we should probably handle this differently
                                 let unicode =
-                                    glyphnames::name_to_unicode(&name);
+                                    glyphnames::name_to_unicode(&name?);
                                 if let Some(unicode) = unicode {
                                     table[code as usize] = unicode;
                                 }
@@ -903,14 +844,15 @@ impl<'a> PdfType3Font<'a> {
             width_map.insert((first_char + i) as CharCode, w);
             i += 1;
         }
-        assert_eq!(first_char + i - 1, last_char);
-        PdfType3Font {
+        // assert_eq!(first_char + i - 1, last_char);
+
+        Ok(Self {
             doc,
             font,
             widths: width_map,
             encoding: encoding_table,
             unicode_map,
-        }
+        })
     }
 }
 
@@ -963,14 +905,9 @@ impl<'a> PdfFont for PdfSimpleFont<'a> {
         } else {
             let mut widths = self.widths.iter().collect::<Vec<_>>();
             widths.sort_by_key(|x| x.0);
-            dlog!("missing width for {} len(widths) = {}, {:?} falling back to missing_width {:?}", id, self.widths.len(), widths, self.font);
             self.missing_width
         }
     }
-    /*fn decode(&self, chars: &[u8]) -> String {
-        let encoding = self.encoding.as_ref().map(|x| &x[..]).unwrap_or(&PDFDocEncoding);
-        to_utf8(encoding, chars)
-    }*/
 
     fn next_char(&self, iter: &mut Iter<u8>) -> Option<(CharCode, u8)> {
         iter.next().map(|x| (*x as CharCode, 1))
@@ -1004,7 +941,7 @@ impl<'a> PdfFont for PdfSimpleFont<'a> {
             .encoding
             .as_ref()
             .map(|x| &x[..])
-            .unwrap_or(PDFDocEncoding);
+            .unwrap_or(PDF_DOC_ENCODING);
         //dlog!("char_code {:?} {:?}", char, self.encoding);
 
         to_utf8(encoding, &slice)
@@ -1050,7 +987,7 @@ impl<'a> PdfFont for PdfType3Font<'a> {
             .encoding
             .as_ref()
             .map(|x| &x[..])
-            .unwrap_or(PDFDocEncoding);
+            .unwrap_or(PDF_DOC_ENCODING);
         //dlog!("char_code {:?} {:?}", char, self.encoding);
 
         to_utf8(encoding, &slice)
@@ -1063,7 +1000,7 @@ impl<'a> fmt::Debug for PdfType3Font<'a> {
     }
 }
 
-struct PdfCIDFont<'a> {
+struct PdfCidFont<'a> {
     font: &'a Dictionary,
     #[allow(dead_code)]
     doc: &'a Document,
@@ -1114,7 +1051,7 @@ fn get_unicode_map<'a>(
         }
         None => {}
         Some(Object::Name(name)) => {
-            let name = pdf_to_utf8(name);
+            let name = pdf_to_utf8(name).ok()?;
             if name != "Identity-H" {
                 todo!("unsupported ToUnicode name: {:?}", name);
             }
@@ -1126,8 +1063,8 @@ fn get_unicode_map<'a>(
     unicode_map
 }
 
-impl<'a> PdfCIDFont<'a> {
-    fn new(doc: &'a Document, font: &'a Dictionary) -> PdfCIDFont<'a> {
+impl<'a> PdfCidFont<'a> {
+    fn new(doc: &'a Document, font: &'a Dictionary) -> error::Result<Self> {
         let base_name = get_name_string(doc, font, b"BaseFont");
         let descendants = maybe_get_array(doc, font, b"DescendantFonts")
             .expect("Descendant fonts required");
@@ -1139,23 +1076,18 @@ impl<'a> PdfCIDFont<'a> {
         dlog!("base_name {} {:?}", base_name, font);
 
         let encoding = match encoding {
-            Object::Name(name) => {
-                let name = pdf_to_utf8(name);
-                dlog!("encoding {:?}", name);
-                assert!(name == "Identity-H");
-                ByteMapping {
-                    codespace: vec![CodeRange {
-                        width: 2,
-                        start: 0,
-                        end: 0xffff,
-                    }],
-                    cid: vec![CIDRange {
-                        src_code_lo: 0,
-                        src_code_hi: 0xffff,
-                        dst_CID_lo: 0,
-                    }],
-                }
-            }
+            Object::Name(_) => ByteMapping {
+                codespace: vec![CodeRange {
+                    width: 2,
+                    start: 0,
+                    end: 0xffff,
+                }],
+                cid: vec![CIDRange {
+                    src_code_lo: 0,
+                    src_code_hi: 0xffff,
+                    dst_CID_lo: 0,
+                }],
+            },
             Object::Stream(stream) => {
                 let contents = get_contents(stream);
                 dlog!(
@@ -1203,18 +1135,19 @@ impl<'a> PdfCIDFont<'a> {
                 }
             }
         }
-        PdfCIDFont {
+
+        Ok(Self {
             doc,
             font,
             widths,
-            to_unicode: unicode_map,
             encoding,
+            to_unicode: unicode_map,
             default_width: Some(default_width as f64),
-        }
+        })
     }
 }
 
-impl<'a> PdfFont for PdfCIDFont<'a> {
+impl<'a> PdfFont for PdfCidFont<'a> {
     fn get_width(&self, id: CharCode) -> f64 {
         let width = self.widths.get(&id);
         if let Some(width) = width {
@@ -1263,7 +1196,7 @@ impl<'a> PdfFont for PdfCIDFont<'a> {
     }
 }
 
-impl<'a> fmt::Debug for PdfCIDFont<'a> {
+impl<'a> fmt::Debug for PdfCidFont<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.font.fmt(f)
     }
@@ -1646,188 +1579,215 @@ pub enum ColorSpace {
     ICCBased(Vec<u8>),
 }
 
-fn make_colorspace<'a>(
-    doc: &'a Document,
-    name: &[u8],
-    resources: &'a Dictionary,
-) -> ColorSpace {
-    match name {
-        b"DeviceGray" => ColorSpace::DeviceGray,
-        b"DeviceRGB" => ColorSpace::DeviceRGB,
-        b"DeviceCMYK" => ColorSpace::DeviceCMYK,
-        b"Pattern" => ColorSpace::Pattern,
-        _ => {
-            let colorspaces: &Dictionary = get(doc, resources, b"ColorSpace");
-            let cs: &Object = maybe_get_obj(doc, colorspaces, name)
-                .unwrap_or_else(|| panic!("missing colorspace {:?}", name));
-            if let Ok(cs) = cs.as_array() {
-                let cs_name = pdf_to_utf8(
-                    cs[0].as_name().expect("first arg must be a name"),
-                );
-                match cs_name.as_ref() {
-                    "Separation" => {
-                        let name = pdf_to_utf8(
-                            cs[1].as_name().expect("second arg must be a name"),
-                        );
-                        let alternate_space = match &maybe_deref(doc, &cs[2]) {
-                            Object::Name(name) => match &name[..] {
-                                b"DeviceGray" => {
-                                    AlternateColorSpace::DeviceGray
-                                }
-                                b"DeviceRGB" => AlternateColorSpace::DeviceRGB,
-                                b"DeviceCMYK" => {
-                                    AlternateColorSpace::DeviceCMYK
-                                }
-                                _ => panic!("unexpected color space name"),
-                            },
-                            Object::Array(cs) => {
-                                let cs_name = pdf_to_utf8(
-                                    cs[0]
-                                        .as_name()
-                                        .expect("first arg must be a name"),
-                                );
-                                match cs_name.as_ref() {
-                                    "ICCBased" => {
-                                        let stream = maybe_deref(doc, &cs[1])
-                                            .as_stream()
-                                            .unwrap();
-                                        dlog!("ICCBased {:?}", stream);
-                                        // XXX: we're going to be continually decompressing everytime this object is referenced
-                                        AlternateColorSpace::ICCBased(
-                                            get_contents(stream),
-                                        )
+impl ColorSpace {
+    fn new<'a>(
+        doc: &'a Document,
+        name: &[u8],
+        resources: &'a Dictionary,
+    ) -> error::Result<Self> {
+        match name {
+            b"DeviceGray" => Ok(Self::DeviceGray),
+            b"DeviceRGB" => Ok(Self::DeviceRGB),
+            b"DeviceCMYK" => Ok(Self::DeviceCMYK),
+            b"Pattern" => Ok(Self::Pattern),
+            _ => {
+                let colorspaces: &Dictionary = get(doc, resources, b"Self");
+                let cs: &Object = maybe_get_obj(doc, colorspaces, name)
+                    .unwrap_or_else(|| panic!("missing colorspace {:?}", name));
+                if let Ok(cs) = cs.as_array() {
+                    let cs_name = pdf_to_utf8(
+                        cs[0].as_name().expect("first arg must be a name"),
+                    )?;
+                    match cs_name.as_ref() {
+                        "Separation" => {
+                            let n = cs.get(1).ok_or_else(|| {
+                                OutputError::Other(String::from(
+                                    "second arg must be a name",
+                                ))
+                            })?;
+                            let n = n.as_name()?;
+                            let name = pdf_to_utf8(n)?;
+                            let alternate_space =
+                                match &maybe_deref(doc, &cs[2]) {
+                                    Object::Name(name) => match &name[..] {
+                                        b"DeviceGray" => {
+                                            AlternateColorSpace::DeviceGray
+                                        }
+                                        b"DeviceRGB" => {
+                                            AlternateColorSpace::DeviceRGB
+                                        }
+                                        b"DeviceCMYK" => {
+                                            AlternateColorSpace::DeviceCMYK
+                                        }
+                                        _ => panic!(
+                                            "unexpected color space name"
+                                        ),
+                                    },
+                                    Object::Array(cs) => {
+                                        let cs_name = pdf_to_utf8(
+                                            cs[0].as_name().expect(
+                                                "first arg must be a name",
+                                            ),
+                                        )?;
+                                        match cs_name.as_ref() {
+                                            "ICCBased" => {
+                                                let stream =
+                                                    maybe_deref(doc, &cs[1])
+                                                        .as_stream()
+                                                        .unwrap();
+                                                AlternateColorSpace::ICCBased(
+                                                    get_contents(stream),
+                                                )
+                                            }
+                                            "CalGray" => {
+                                                let dict = cs[1]
+                                                    .as_dict()
+                                                    .expect(
+                                                    "second arg must be a dict",
+                                                );
+                                                AlternateColorSpace::CalGray(
+                                                    CalGray {
+                                                        white_point: get(
+                                                            doc,
+                                                            dict,
+                                                            b"WhitePoint",
+                                                        ),
+                                                        black_point: get(
+                                                            doc,
+                                                            dict,
+                                                            b"BackPoint",
+                                                        ),
+                                                        gamma: get(
+                                                            doc, dict, b"Gamma",
+                                                        ),
+                                                    },
+                                                )
+                                            }
+                                            "CalRGB" => {
+                                                let dict = cs[1]
+                                                    .as_dict()
+                                                    .expect(
+                                                    "second arg must be a dict",
+                                                );
+                                                AlternateColorSpace::CalRGB(
+                                                    CalRGB {
+                                                        white_point: get(
+                                                            doc,
+                                                            dict,
+                                                            b"WhitePoint",
+                                                        ),
+                                                        black_point: get(
+                                                            doc,
+                                                            dict,
+                                                            b"BackPoint",
+                                                        ),
+                                                        gamma: get(
+                                                            doc, dict, b"Gamma",
+                                                        ),
+                                                        matrix: get(
+                                                            doc, dict,
+                                                            b"Matrix",
+                                                        ),
+                                                    },
+                                                )
+                                            }
+                                            "Lab" => {
+                                                let dict = cs[1]
+                                                    .as_dict()
+                                                    .expect(
+                                                    "second arg must be a dict",
+                                                );
+                                                AlternateColorSpace::Lab(Lab {
+                                                    white_point: get(
+                                                        doc,
+                                                        dict,
+                                                        b"WhitePoint",
+                                                    ),
+                                                    black_point: get(
+                                                        doc,
+                                                        dict,
+                                                        b"BackPoint",
+                                                    ),
+                                                    range: get(
+                                                        doc, dict, b"Range",
+                                                    ),
+                                                })
+                                            }
+                                            _ => panic!(
+                                                "Unexpected color space name"
+                                            ),
+                                        }
                                     }
-                                    "CalGray" => {
-                                        let dict = cs[1].as_dict().expect(
-                                            "second arg must be a dict",
-                                        );
-                                        AlternateColorSpace::CalGray(CalGray {
-                                            white_point: get(
-                                                doc,
-                                                dict,
-                                                b"WhitePoint",
-                                            ),
-                                            black_point: get(
-                                                doc,
-                                                dict,
-                                                b"BackPoint",
-                                            ),
-                                            gamma: get(doc, dict, b"Gamma"),
-                                        })
-                                    }
-                                    "CalRGB" => {
-                                        let dict = cs[1].as_dict().expect(
-                                            "second arg must be a dict",
-                                        );
-                                        AlternateColorSpace::CalRGB(CalRGB {
-                                            white_point: get(
-                                                doc,
-                                                dict,
-                                                b"WhitePoint",
-                                            ),
-                                            black_point: get(
-                                                doc,
-                                                dict,
-                                                b"BackPoint",
-                                            ),
-                                            gamma: get(doc, dict, b"Gamma"),
-                                            matrix: get(doc, dict, b"Matrix"),
-                                        })
-                                    }
-                                    "Lab" => {
-                                        let dict = cs[1].as_dict().expect(
-                                            "second arg must be a dict",
-                                        );
-                                        AlternateColorSpace::Lab(Lab {
-                                            white_point: get(
-                                                doc,
-                                                dict,
-                                                b"WhitePoint",
-                                            ),
-                                            black_point: get(
-                                                doc,
-                                                dict,
-                                                b"BackPoint",
-                                            ),
-                                            range: get(doc, dict, b"Range"),
-                                        })
-                                    }
-                                    _ => panic!("Unexpected color space name"),
-                                }
-                            }
-                            _ => panic!(
+                                    _ => panic!(
                                 "Alternate space should be name or array {:?}",
                                 cs[2]
                             ),
-                        };
-                        let tint_transform = Box::new(Function::new(
-                            doc,
-                            maybe_deref(doc, &cs[3]),
-                        ));
-
-                        dlog!(
-                            "{:?} {:?} {:?}",
-                            name,
-                            alternate_space,
-                            tint_transform
-                        );
-                        ColorSpace::Separation(Separation {
-                            name,
-                            alternate_space,
-                            tint_transform,
-                        })
+                                };
+                            let tint_transform = Box::new(Function::new(
+                                doc,
+                                maybe_deref(doc, &cs[3]),
+                            ));
+                            Ok(Self::Separation(Separation {
+                                name,
+                                alternate_space,
+                                tint_transform,
+                            }))
+                        }
+                        "ICCBased" => {
+                            let stream =
+                                maybe_deref(doc, &cs[1]).as_stream().unwrap();
+                            // XXX: we're going to be continually decompressing everytime this object is referenced
+                            Ok(Self::ICCBased(get_contents(stream)))
+                        }
+                        "CalGray" => {
+                            let dict = cs[1]
+                                .as_dict()
+                                .expect("second arg must be a dict");
+                            Ok(Self::CalGray(CalGray {
+                                white_point: get(doc, dict, b"WhitePoint"),
+                                black_point: get(doc, dict, b"BackPoint"),
+                                gamma: get(doc, dict, b"Gamma"),
+                            }))
+                        }
+                        "CalRGB" => {
+                            let dict = cs[1]
+                                .as_dict()
+                                .expect("second arg must be a dict");
+                            Ok(Self::CalRGB(CalRGB {
+                                white_point: get(doc, dict, b"WhitePoint"),
+                                black_point: get(doc, dict, b"BackPoint"),
+                                gamma: get(doc, dict, b"Gamma"),
+                                matrix: get(doc, dict, b"Matrix"),
+                            }))
+                        }
+                        "Lab" => {
+                            let dict = cs[1]
+                                .as_dict()
+                                .expect("second arg must be a dict");
+                            Ok(Self::Lab(Lab {
+                                white_point: get(doc, dict, b"WhitePoint"),
+                                black_point: get(doc, dict, b"BackPoint"),
+                                range: get(doc, dict, b"Range"),
+                            }))
+                        }
+                        "Pattern" => Ok(Self::Pattern),
+                        "DeviceGray" => Ok(Self::DeviceGray),
+                        "DeviceRGB" => Ok(Self::DeviceRGB),
+                        "DeviceCMYK" => Ok(Self::DeviceCMYK),
+                        _ => Err(OutputError::Other(format!(
+                            "color_space {:?} {:?} {:?}",
+                            name, cs_name, cs
+                        ))),
                     }
-                    "ICCBased" => {
-                        let stream =
-                            maybe_deref(doc, &cs[1]).as_stream().unwrap();
-                        dlog!("ICCBased {:?}", stream);
-                        // XXX: we're going to be continually decompressing everytime this object is referenced
-                        ColorSpace::ICCBased(get_contents(stream))
+                } else if let Ok(cs) = cs.as_name() {
+                    match pdf_to_utf8(cs)?.as_ref() {
+                        "DeviceRGB" => Ok(Self::DeviceRGB),
+                        "DeviceGray" => Ok(Self::DeviceGray),
+                        _ => Err(OutputError::Other(String::from("Err"))),
                     }
-                    "CalGray" => {
-                        let dict =
-                            cs[1].as_dict().expect("second arg must be a dict");
-                        ColorSpace::CalGray(CalGray {
-                            white_point: get(doc, dict, b"WhitePoint"),
-                            black_point: get(doc, dict, b"BackPoint"),
-                            gamma: get(doc, dict, b"Gamma"),
-                        })
-                    }
-                    "CalRGB" => {
-                        let dict =
-                            cs[1].as_dict().expect("second arg must be a dict");
-                        ColorSpace::CalRGB(CalRGB {
-                            white_point: get(doc, dict, b"WhitePoint"),
-                            black_point: get(doc, dict, b"BackPoint"),
-                            gamma: get(doc, dict, b"Gamma"),
-                            matrix: get(doc, dict, b"Matrix"),
-                        })
-                    }
-                    "Lab" => {
-                        let dict =
-                            cs[1].as_dict().expect("second arg must be a dict");
-                        ColorSpace::Lab(Lab {
-                            white_point: get(doc, dict, b"WhitePoint"),
-                            black_point: get(doc, dict, b"BackPoint"),
-                            range: get(doc, dict, b"Range"),
-                        })
-                    }
-                    "Pattern" => ColorSpace::Pattern,
-                    "DeviceGray" => ColorSpace::DeviceGray,
-                    "DeviceRGB" => ColorSpace::DeviceRGB,
-                    "DeviceCMYK" => ColorSpace::DeviceCMYK,
-                    _ => {
-                        panic!("color_space {:?} {:?} {:?}", name, cs_name, cs)
-                    }
+                } else {
+                    Err(OutputError::Other(String::from("Err")))
                 }
-            } else if let Ok(cs) = cs.as_name() {
-                match pdf_to_utf8(cs).as_ref() {
-                    "DeviceRGB" => ColorSpace::DeviceRGB,
-                    "DeviceGray" => ColorSpace::DeviceGray,
-                    _ => panic!(),
-                }
-            } else {
-                panic!();
             }
         }
     }
@@ -1910,11 +1870,12 @@ impl<'a> Processor<'a> {
                 "CS" => {
                     let name = operation.operands[0].as_name().unwrap();
                     gs.stroke_colorspace =
-                        make_colorspace(doc, name, resources);
+                        ColorSpace::new(doc, name, resources).unwrap();
                 }
                 "cs" => {
                     let name = operation.operands[0].as_name().unwrap();
-                    gs.fill_colorspace = make_colorspace(doc, name, resources);
+                    gs.fill_colorspace =
+                        ColorSpace::new(doc, name, resources).unwrap();
                 }
                 "SC" | "SCN" => {
                     gs.stroke_color = match gs.stroke_colorspace {
@@ -2009,17 +1970,10 @@ impl<'a> Processor<'a> {
                         .entry(name.to_owned())
                         .or_insert_with(|| {
                             make_font(doc, get::<&Dictionary>(doc, fonts, name))
+                                .unwrap()
                         })
                         .clone();
-                    {
-                        /*let file = font.get_descriptor().and_then(|desc| desc.get_file());
-                        if let Some(file) = file {
-                            let file_contents = filter_data(file.as_stream().unwrap());
-                            let mut cursor = Cursor::new(&file_contents[..]);
-                            //let f = Font::read(&mut cursor);
-                            //dlog!("font file: {:?}", f);
-                        }*/
-                    }
+
                     gs.ts.font = Some(font);
 
                     gs.ts.font_size = as_num(&operation.operands[1]);
@@ -2665,26 +2619,6 @@ impl<W: ConvertToFmt> OutputDev for PlainTextOutput<W> {
     }
 }
 
-pub fn print_metadata(doc: &Document) {
-    dlog!("Version: {}", doc.version);
-    if let Some(info) = get_info(doc) {
-        for (k, v) in info {
-            if let &Object::String(ref s, StringFormat::Literal) = v {
-                dlog!("{}: {}", pdf_to_utf8(k), pdf_to_utf8(s));
-            }
-        }
-    }
-    dlog!("Page count: {}", get::<i64>(doc, get_pages(doc), b"Count"));
-    dlog!("Pages: {:?}", get_pages(doc));
-    dlog!(
-        "Type: {:?}",
-        get_pages(doc)
-            .get(b"Type")
-            .and_then(|x| x.as_name())
-            .unwrap()
-    );
-}
-
 /// Extract the text from a pdf at `path` and return a `String` with the results
 pub fn extract_text<P: std::convert::AsRef<std::path::Path>>(
     path: P,
@@ -2709,10 +2643,10 @@ fn maybe_decrypt(doc: &mut Document) -> Result<(), OutputError> {
             eprintln!("Encrypted documents must be decrypted with a password using {{extract_text|extract_text_from_mem|output_doc}}_encrypted")
         }
 
-        return Err(OutputError::PdfError(e));
+        Err(OutputError::Pdf(e))
+    } else {
+        Ok(())
     }
-
-    Ok(())
 }
 
 pub fn extract_text_encrypted<
