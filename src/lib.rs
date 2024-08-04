@@ -61,7 +61,7 @@ fn pdf_to_utf8(s: &[u8]) -> error::Result<String> {
     let s = if s.len() > 2 && s[0] == 0xfe && s[1] == 0xff {
         UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&s[2..])
-            .ok_or_else(|| OutputError::from("TODO pdf_to_utf8"))?
+            .ok_or_else(|| OutputError::from("UTF-8 decoding failed"))?
             .to_string()
     } else {
         let r: Vec<u8> = s
@@ -75,7 +75,7 @@ fn pdf_to_utf8(s: &[u8]) -> error::Result<String> {
 
         UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&r)
-            .ok_or_else(|| OutputError::from("TODO pdf_to_utf8"))?
+            .ok_or_else(|| OutputError::from("UTF-8 decoding failed"))?
             .to_string()
     };
 
@@ -86,7 +86,7 @@ fn to_utf8(encoding: &[u16], s: &[u8]) -> error::Result<String> {
     let r = if s.len() > 2 && s[0] == 0xfe && s[1] == 0xff {
         UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&s[2..])
-            .ok_or_else(|| OutputError::from("TODO to_utf8"))?
+            .ok_or_else(|| OutputError::from("UTF-8 decoding failed"))?
             .to_string()
     } else {
         let r: Vec<u8> = s
@@ -100,7 +100,7 @@ fn to_utf8(encoding: &[u16], s: &[u8]) -> error::Result<String> {
 
         UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&r)
-            .ok_or_else(|| OutputError::from("TODO to_utf8"))?
+            .ok_or_else(|| OutputError::from("UTF-8 decoding failed"))?
             .to_string()
     };
 
@@ -198,13 +198,13 @@ impl<'a, T: FromObj<'a>> FromObj<'a> for [T; 4] {
                     .iter()
                     .map(|x| {
                         T::from_obj(doc, x)
-                            .ok_or_else(|| OutputError::from("Wrong type"))
+                            .ok_or_else(|| OutputError::from("wrong type"))
                     })
                     .collect::<error::Result<Vec<_>>>();
                 match all {
                     // TODO Find a nicer way to do this
                     Ok(all) => {
-                        let err = || OutputError::from("TODO from_obj");
+                        let err = || OutputError::from("wrong type");
                         let mut all = all.into_iter();
                         let n1 = all.next().ok_or_else(err)?;
                         let n2 = all.next().ok_or_else(err)?;
@@ -230,12 +230,12 @@ impl<'a, T: FromObj<'a>> FromObj<'a> for [T; 3] {
                     .iter()
                     .map(|x| {
                         T::from_obj(doc, x)
-                            .ok_or_else(|| OutputError::from("Wrong type"))
+                            .ok_or_else(|| OutputError::from("wrong type"))
                     })
                     .collect::<error::Result<Vec<_>>>();
                 match all {
                     Ok(all) => {
-                        let err = || OutputError::from("TODO from_obj");
+                        let err = || OutputError::from("wrong type");
                         let mut all = all.into_iter();
                         let n1 = all.next().ok_or_else(err)?;
                         let n2 = all.next().ok_or_else(err)?;
@@ -406,7 +406,7 @@ fn encoding_to_unicode_table(name: &[u8]) -> error::Result<Vec<u16>> {
         .map(|x| {
             if let &Some(x) = x {
                 glyphnames::name_to_unicode(x)
-                    .ok_or_else(|| OutputError::from("TODO encoding"))
+                    .ok_or_else(|| OutputError::from("unexpected encoding"))
             } else {
                 Ok(0)
             }
@@ -444,11 +444,8 @@ impl<'a> PdfSimpleFont<'a> {
                 }
             } else if subtype == "TrueType" {
                 let file = maybe_get_obj(doc, descriptor, b"FontFile2");
-                match file {
-                    Some(Object::Stream(s)) => {
-                        let _s = get_contents(s);
-                    }
-                    _ => {}
+                if let Some(Object::Stream(s)) = file {
+                    let _s = get_contents(s);
                 }
             }
         }
@@ -563,7 +560,11 @@ impl<'a> PdfSimpleFont<'a> {
                             .map(|x| {
                                 if let &Some(x) = x {
                                     glyphnames::name_to_unicode(x).ok_or_else(
-                                        || OutputError::from("TODO font"),
+                                        || {
+                                            OutputError::from(
+                                                "unexpected encoding",
+                                            )
+                                        },
                                     )
                                 } else {
                                     Ok(0)
@@ -574,7 +575,7 @@ impl<'a> PdfSimpleFont<'a> {
                 }
             }
             _ => {
-                Err(OutputError::from("TODO font"))?;
+                Err(OutputError::from("unexpected encoding"))?;
             }
         }
 
@@ -608,7 +609,7 @@ impl<'a> PdfSimpleFont<'a> {
                         for w in font_metrics.2 {
                             let c = glyphnames::name_to_unicode(w.2)
                                 .ok_or_else(|| {
-                                    OutputError::from("TODO font")
+                                    OutputError::from("unexpected encoding")
                                 })?;
                             for (i, item) in encoding.iter().enumerate() {
                                 if *item == c {
@@ -780,7 +781,7 @@ impl<'a> PdfType3Font<'a> {
                 unicode_map,
             })
         } else {
-            Err(OutputError::from("TODO font"))
+            Err(OutputError::from("unexpected encoding"))
         }
     }
 }
@@ -970,7 +971,7 @@ fn get_unicode_map<'a>(
             to_unicode
         )))?,
     }
-    unicode_map.ok_or_else(|| OutputError::from("TODO get_unicode_map"))
+    unicode_map.ok_or_else(|| OutputError::from("failed to create unicode map"))
 }
 
 impl<'a> PdfCidFont<'a> {
@@ -1175,7 +1176,7 @@ impl Function {
         let dict = match obj {
             Object::Dictionary(dict) => Ok(dict),
             Object::Stream(stream) => Ok(&stream.dict),
-            _ => Err(OutputError::from("TODO new")),
+            _ => Err(OutputError::from("failed to create dictionary")),
         }?;
         let function_type: i64 = get(doc, dict, b"FunctionType")?;
 
@@ -1183,7 +1184,7 @@ impl Function {
             0 => {
                 let stream = match obj {
                     Object::Stream(stream) => Ok(stream),
-                    _ => Err(OutputError::from("TODO new")),
+                    _ => Err(OutputError::from("failed to create stream")),
                 }?;
                 let range: Vec<f64> = get(doc, dict, b"Range")?;
                 let domain: Vec<f64> = get(doc, dict, b"Domain")?;
@@ -1356,7 +1357,7 @@ fn apply_state(
                         gs.smask = None;
                         Ok(())
                     } else {
-                        Err(OutputError::from(format!("unexpected smask name")))
+                        Err(OutputError::from("unexpected smask name".to_string()))
                     }
                 }
                 Object::Dictionary(dict) => {
@@ -1414,7 +1415,7 @@ impl Path {
             PathOp::MoveTo(x, y) => Ok((x, y)),
             PathOp::LineTo(x, y) => Ok((x, y)),
             PathOp::CurveTo(_, _, _, _, x, y) => Ok((x, y)),
-            _ => Err(OutputError::from("TODO current_point")),
+            _ => Err(OutputError::from("invalid current point")),
         }
     }
 }
