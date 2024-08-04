@@ -25,3 +25,6 @@ unicode-normalization = "0.1.19"
 
 [dev-dependencies]
 ureq = "2.6.2"
+
+[lints.clippy]
+use_self = "deny"

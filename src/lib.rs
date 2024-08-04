@@ -180,7 +180,7 @@ impl<'a, T: FromObj<'a>> FromObj<'a> for Vec<T> {
                         T::from_obj(doc, x)
                             .ok_or_else(|| OutputError::from("wrong type"))
                     })
-                    .collect::<error::Result<Vec<_>>>()
+                    .collect::<error::Result<Self>>()
             })
             .ok()?
             .ok()
@@ -252,7 +252,7 @@ impl<'a, T: FromObj<'a>> FromObj<'a> for [T; 3] {
 impl<'a> FromObj<'a> for f64 {
     fn from_obj(_doc: &Document, obj: &Object) -> Option<Self> {
         match *obj {
-            Object::Integer(i) => Some(i as f64),
+            Object::Integer(i) => Some(i as Self),
             Object::Real(f) => Some(f.into()),
             _ => None,
         }
@@ -423,10 +423,7 @@ fn encoding_to_unicode_table(name: &[u8]) -> error::Result<Vec<u16>> {
     described in Section 5.5.5, “Character Encoding.”
 */
 impl<'a> PdfSimpleFont<'a> {
-    fn new(
-        doc: &'a Document,
-        font: &'a Dictionary,
-    ) -> error::Result<PdfSimpleFont<'a>> {
+    fn new(doc: &'a Document, font: &'a Dictionary) -> error::Result<Self> {
         let base_name = get_name_string(doc, font, b"BaseFont")?;
         let subtype = get_name_string(doc, font, b"Subtype")?;
         let encoding: Option<&Object> = get(doc, font, b"Encoding")?;
@@ -595,13 +592,14 @@ impl<'a> PdfSimpleFont<'a> {
             maybe_get::<Vec<f64>>(doc, font, b"Widths"),
         ) {
             // Some PDF's don't have these like fips-197.pdf
-            let mut i: i64 = 0;
+            let max = (widths.len() - 1) as i64;
 
-            for w in widths {
+            widths.into_iter().enumerate().for_each(|(i, w)| {
+                let i = i as i64;
                 width_map.insert((first_char + i) as CharCode, w);
-                i += 1;
-            }
-            assert_eq!(first_char + i - 1, last_char);
+            });
+
+            assert_eq!(first_char + max, last_char);
         } else if is_core_font(&base_name) {
             for font_metrics in core_fonts::metrics().iter() {
                 if font_metrics.0 == base_name {
@@ -882,6 +880,7 @@ impl<'a> PdfFont for PdfType3Font<'a> {
     fn next_char(&self, iter: &mut Iter<u8>) -> Option<(CharCode, u8)> {
         iter.next().map(|x| (*x as CharCode, 1))
     }
+
     fn decode_char(&self, char: CharCode) -> error::Result<String> {
         let slice = [char as u8];
         if let Some(ref unicode_map) = self.unicode_map {
@@ -1172,7 +1171,7 @@ enum Function {
 }
 
 impl Function {
-    fn new(doc: &Document, obj: &Object) -> error::Result<Function> {
+    fn new(doc: &Document, obj: &Object) -> error::Result<Self> {
         let dict = match obj {
             Object::Dictionary(dict) => Ok(dict),
             Object::Stream(stream) => Ok(&stream.dict),
@@ -1357,7 +1356,9 @@ fn apply_state(
                         gs.smask = None;
                         Ok(())
                     } else {
-                        Err(OutputError::from("unexpected smask name".to_string()))
+                        Err(OutputError::from(
+                            "unexpected smask name".to_string(),
+                        ))
                     }
                 }
                 Object::Dictionary(dict) => {
@@ -1396,16 +1397,12 @@ pub enum PathOp {
     Close,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Path {
     pub ops: Vec<PathOp>,
 }
 
 impl Path {
-    fn new() -> Self {
-        Path { ops: Vec::new() }
-    }
-
     fn current_point(&self) -> error::Result<(f64, f64)> {
         match *self
             .ops
@@ -1709,7 +1706,7 @@ impl<'a> Processor<'a> {
         let mut mc_stack = Vec::new();
         // XXX: replace tlm with a point for text start
         let mut tlm = Transform2D::identity();
-        let mut path = Path::new();
+        let mut path = Path::default();
         let flip_ctm = Transform2D::row_major(
             1.,
             0.,
@@ -2366,8 +2363,8 @@ pub struct PlainTextOutput<W: ConvertToFmt> {
 }
 
 impl<W: ConvertToFmt> PlainTextOutput<W> {
-    pub fn new(writer: W) -> PlainTextOutput<W> {
-        PlainTextOutput {
+    pub fn new(writer: W) -> Self {
+        Self {
             writer: writer.convert(),
             last_end: 100000.,
             first_char: false,
@@ -2396,9 +2393,11 @@ impl<W: ConvertToFmt> OutputDev for PlainTextOutput<W> {
         );
         Ok(())
     }
+
     fn end_page(&mut self) -> Result<(), OutputError> {
         Ok(())
     }
+
     fn output_character(
         &mut self,
         trm: &Transform,
@@ -2438,15 +2437,17 @@ impl<W: ConvertToFmt> OutputDev for PlainTextOutput<W> {
         self.last_end = x + width * transformed_font_size;
         Ok(())
     }
+
     fn begin_word(&mut self) -> Result<(), OutputError> {
         self.first_char = true;
         Ok(())
     }
+
     fn end_word(&mut self) -> Result<(), OutputError> {
         Ok(())
     }
+
     fn end_line(&mut self) -> Result<(), OutputError> {
-        //write!(self.file, "\n");
         Ok(())
     }
 }

@@ -19,12 +19,12 @@ pub type Result<T> = std::result::Result<T, OutputError>;
 
 impl From<String> for OutputError {
     fn from(e: String) -> Self {
-        OutputError::Other(e)
+        Self::Other(e)
     }
 }
 
 impl From<&str> for OutputError {
     fn from(e: &str) -> Self {
-        OutputError::Other(e.into())
+        Self::Other(e.into())
     }
 }
