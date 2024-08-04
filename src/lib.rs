@@ -126,12 +126,15 @@ fn maybe_get_obj<'a>(
 }
 
 // an intermediate trait that can be used to chain conversions that may have failed
-trait FromOptObj<'a> {
+trait FromOptObj<'a>
+where
+    Self: Sized,
+{
     fn from_opt_obj(
         doc: &'a Document,
         obj: Option<&'a Object>,
         key: &[u8],
-    ) -> Self;
+    ) -> error::Result<Self>;
 }
 
 // conditionally convert to Self returns None if the conversion failed
@@ -147,8 +150,8 @@ impl<'a, T: FromObj<'a>> FromOptObj<'a> for Option<T> {
         doc: &'a Document,
         obj: Option<&'a Object>,
         _key: &[u8],
-    ) -> Self {
-        obj.and_then(|x| T::from_obj(doc, x))
+    ) -> error::Result<Self> {
+        Ok(obj.and_then(|x| T::from_obj(doc, x)))
     }
 }
 
@@ -156,15 +159,11 @@ impl<'a, T: FromObj<'a>> FromOptObj<'a> for T {
     fn from_opt_obj(
         doc: &'a Document,
         obj: Option<&'a Object>,
-        key: &[u8],
-    ) -> Self {
-        T::from_obj(
-            doc,
-            obj.unwrap_or_else(|| {
-                panic!("{}", String::from_utf8_lossy(key).to_string())
-            }),
-        )
-        .expect("wrong type")
+        _key: &[u8],
+    ) -> error::Result<Self> {
+        let obj = obj.ok_or_else(|| OutputError::from("missing object"))?;
+        T::from_obj(doc, obj)
+            .ok_or_else(|| OutputError::from("could not convert"))
     }
 }
 
@@ -177,9 +176,13 @@ impl<'a, T: FromObj<'a>> FromObj<'a> for Vec<T> {
             .as_array()
             .map(|x| {
                 x.iter()
-                    .map(|x| T::from_obj(doc, x).expect("wrong type"))
-                    .collect()
+                    .map(|x| {
+                        T::from_obj(doc, x)
+                            .ok_or_else(|| OutputError::from("wrong type"))
+                    })
+                    .collect::<error::Result<Vec<_>>>()
             })
+            .ok()?
             .ok()
     }
 }
@@ -287,7 +290,7 @@ fn get<'a, T: FromOptObj<'a>>(
     doc: &'a Document,
     dict: &'a Dictionary,
     key: &[u8],
-) -> T {
+) -> error::Result<T> {
     T::from_opt_obj(doc, dict.get(key).ok(), key)
 }
 
@@ -426,8 +429,9 @@ impl<'a> PdfSimpleFont<'a> {
     ) -> error::Result<PdfSimpleFont<'a>> {
         let base_name = get_name_string(doc, font, b"BaseFont")?;
         let subtype = get_name_string(doc, font, b"Subtype")?;
-        let encoding: Option<&Object> = get(doc, font, b"Encoding");
-        let descriptor: Option<&Dictionary> = get(doc, font, b"FontDescriptor");
+        let encoding: Option<&Object> = get(doc, font, b"Encoding")?;
+        let descriptor: Option<&Dictionary> =
+            get(doc, font, b"FontDescriptor")?;
         let mut type1_encoding = None;
 
         if let Some(descriptor) = descriptor {
@@ -435,10 +439,8 @@ impl<'a> PdfSimpleFont<'a> {
                 let file = maybe_get_obj(doc, descriptor, b"FontFile");
                 if let Some(Object::Stream(s)) = file {
                     let s = get_contents(s);
-                    type1_encoding = Some(
-                        type1_encoding_parser::get_encoding_map(&s)
-                            .expect("encoding"),
-                    );
+                    type1_encoding =
+                        Some(type1_encoding_parser::get_encoding_map(&s)?);
                 }
             } else if subtype == "TrueType" {
                 let file = maybe_get_obj(doc, descriptor, b"FontFile2");
@@ -660,7 +662,7 @@ impl<'a> PdfSimpleFont<'a> {
         }
 
         let missing_width =
-            get::<Option<f64>>(doc, font, b"MissingWidth").unwrap_or(0.);
+            get::<Option<f64>>(doc, font, b"MissingWidth")?.unwrap_or(0.);
 
         Ok(Self {
             doc,
@@ -710,7 +712,7 @@ impl<'a> PdfSimpleFont<'a> {
 impl<'a> PdfType3Font<'a> {
     fn new(doc: &'a Document, font: &'a Dictionary) -> error::Result<Self> {
         let unicode_map = get_unicode_map(doc, font).ok();
-        let encoding: Option<&Object> = get(doc, font, b"Encoding");
+        let encoding: Option<&Object> = get(doc, font, b"Encoding")?;
         let encoding_table = match encoding {
             Some(Object::Name(encoding_name)) => {
                 Some(encoding_to_unicode_table(encoding_name)?)
@@ -756,9 +758,9 @@ impl<'a> PdfType3Font<'a> {
             _ => None,
         };
 
-        let first_char: i64 = get(doc, font, b"FirstChar");
-        let last_char: i64 = get(doc, font, b"LastChar");
-        let widths: Vec<f64> = get(doc, font, b"Widths");
+        let first_char: i64 = get(doc, font, b"FirstChar")?;
+        let last_char: i64 = get(doc, font, b"LastChar")?;
+        let widths: Vec<f64> = get(doc, font, b"Widths")?;
         let max = widths.len() as i64;
         let width_map = widths
             .into_iter()
@@ -974,7 +976,7 @@ fn get_unicode_map<'a>(
 impl<'a> PdfCidFont<'a> {
     fn new(doc: &'a Document, font: &'a Dictionary) -> error::Result<Self> {
         let descendants = maybe_get_array(doc, font, b"DescendantFonts")
-            .expect("Descendant fonts required");
+            .ok_or_else(|| OutputError::from("Descendant fonts required"))?;
         let ciddict = maybe_deref(doc, &descendants[0])?.as_dict()?;
         let encoding =
             maybe_get_obj(doc, font, b"Encoding").ok_or_else(|| {
@@ -1010,27 +1012,27 @@ impl<'a> PdfCidFont<'a> {
         // This won't work if the cmap has been subsetted. A better approach might be to hash glyph contents and use that against
         // a global library of glyph hashes
         let unicode_map = get_unicode_map(doc, font).ok();
-        let font_dict =
-            maybe_get_obj(doc, ciddict, b"FontDescriptor").expect("required");
-        let _f = font_dict.as_dict().expect("must be dict");
+        let font_dict = maybe_get_obj(doc, ciddict, b"FontDescriptor")
+            .ok_or_else(|| OutputError::from("required"))?;
+        let _f = font_dict.as_dict()?;
         let default_width =
-            get::<Option<i64>>(doc, ciddict, b"DW").unwrap_or(1000);
-        let w: Option<Vec<&Object>> = get(doc, ciddict, b"W");
+            get::<Option<i64>>(doc, ciddict, b"DW")?.unwrap_or(1000);
+        let w: Option<Vec<&Object>> = get(doc, ciddict, b"W")?;
         let mut widths = HashMap::new();
         let mut i = 0;
         if let Some(w) = w {
             while i < w.len() {
                 if let Object::Array(wa) = w[i + 1] {
-                    let cid = w[i].as_i64().expect("id should be num");
+                    let cid = w[i].as_i64()?;
                     for (j, w) in wa.iter().enumerate() {
                         let j = j as i64;
-                        widths.insert((cid + j) as CharCode, as_num(w));
+                        widths.insert((cid + j) as CharCode, as_num(w)?);
                     }
                     i += 2;
                 } else {
-                    let c_first = w[i].as_i64().expect("first should be num");
-                    let c_last = w[i].as_i64().expect("last should be num");
-                    let c_width = as_num(w[i]);
+                    let c_first = w[i].as_i64()?;
+                    let c_last = w[i].as_i64()?;
+                    let c_width = as_num(w[i])?;
                     for id in c_first..c_last {
                         widths.insert(id as CharCode, c_width);
                     }
@@ -1169,28 +1171,28 @@ enum Function {
 }
 
 impl Function {
-    fn new(doc: &Document, obj: &Object) -> Function {
+    fn new(doc: &Document, obj: &Object) -> error::Result<Function> {
         let dict = match obj {
-            Object::Dictionary(dict) => dict,
-            Object::Stream(stream) => &stream.dict,
-            _ => panic!(),
-        };
-        let function_type: i64 = get(doc, dict, b"FunctionType");
+            Object::Dictionary(dict) => Ok(dict),
+            Object::Stream(stream) => Ok(&stream.dict),
+            _ => Err(OutputError::from("TODO new")),
+        }?;
+        let function_type: i64 = get(doc, dict, b"FunctionType")?;
 
         match function_type {
             0 => {
                 let stream = match obj {
-                    Object::Stream(stream) => stream,
-                    _ => panic!(),
-                };
-                let range: Vec<f64> = get(doc, dict, b"Range");
-                let domain: Vec<f64> = get(doc, dict, b"Domain");
+                    Object::Stream(stream) => Ok(stream),
+                    _ => Err(OutputError::from("TODO new")),
+                }?;
+                let range: Vec<f64> = get(doc, dict, b"Range")?;
+                let domain: Vec<f64> = get(doc, dict, b"Domain")?;
                 let contents = get_contents(stream);
-                let size: Vec<i64> = get(doc, dict, b"Size");
-                let bits_per_sample = get(doc, dict, b"BitsPerSample");
+                let size: Vec<i64> = get(doc, dict, b"Size")?;
+                let bits_per_sample = get(doc, dict, b"BitsPerSample")?;
                 // We ignore 'Order' like pdfium, poppler and pdf.js
 
-                let encode = get::<Option<Vec<f64>>>(doc, dict, b"Encode");
+                let encode = get::<Option<Vec<f64>>>(doc, dict, b"Encode")?;
                 // maybe there's some better way to write this.
                 let encode = encode.unwrap_or_else(|| {
                     let mut default = Vec::new();
@@ -1199,10 +1201,10 @@ impl Function {
                     }
                     default
                 });
-                let decode = get::<Option<Vec<f64>>>(doc, dict, b"Decode")
+                let decode = get::<Option<Vec<f64>>>(doc, dict, b"Decode")?
                     .unwrap_or_else(|| range.clone());
 
-                Function::Type0(Type0Func {
+                Ok(Self::Type0(Type0Func {
                     domain,
                     range,
                     size,
@@ -1210,28 +1212,27 @@ impl Function {
                     bits_per_sample,
                     encode,
                     decode,
-                })
+                }))
             }
             2 => {
-                let c0 = get::<Option<Vec<f64>>>(doc, dict, b"C0");
-                let c1 = get::<Option<Vec<f64>>>(doc, dict, b"C1");
-                let n = get::<f64>(doc, dict, b"N");
-                Function::Type2(Type2Func { c0, c1, n })
+                let c0 = get::<Option<Vec<f64>>>(doc, dict, b"C0")?;
+                let c1 = get::<Option<Vec<f64>>>(doc, dict, b"C1")?;
+                let n = get::<f64>(doc, dict, b"N")?;
+                Ok(Self::Type2(Type2Func { c0, c1, n }))
             }
-            _ => {
-                panic!("unhandled function type {}", function_type)
-            }
+            _ => Err(OutputError::from(format!(
+                "unhandled function type {}",
+                function_type
+            ))),
         }
     }
 }
 
-fn as_num(o: &Object) -> f64 {
+fn as_num(o: &Object) -> error::Result<f64> {
     match *o {
-        Object::Integer(i) => i as f64,
-        Object::Real(f) => f.into(),
-        _ => {
-            panic!("not a number")
-        }
+        Object::Integer(i) => Ok(i as f64),
+        Object::Real(f) => Ok(f.into()),
+        _ => Err(OutputError::from("not a number")),
     }
 }
 
@@ -1487,7 +1488,7 @@ impl ColorSpace {
             b"DeviceCMYK" => Ok(Self::DeviceCmyk),
             b"Pattern" => Ok(Self::Pattern),
             _ => {
-                let colorspaces: &Dictionary = get(doc, resources, b"Self");
+                let colorspaces: &Dictionary = get(doc, resources, b"Self")?;
                 let cs: &Object = maybe_get_obj(doc, colorspaces, name)
                     .ok_or_else(|| OutputError::from("Missing colorspace"))?;
                 if let Ok(cs) = cs.as_array() {
@@ -1536,43 +1537,41 @@ impl ColorSpace {
                                                             doc,
                                                             dict,
                                                             b"WhitePoint",
-                                                        ),
+                                                        )?,
                                                         black_point: get(
                                                             doc,
                                                             dict,
                                                             b"BackPoint",
-                                                        ),
+                                                        )?,
                                                         gamma: get(
                                                             doc, dict, b"Gamma",
-                                                        ),
+                                                        )?,
                                                     },
                                                 )
                                             }
                                             "CalRGB" => {
                                                 let dict = cs[1]
-                                                    .as_dict()
-                                                    .expect(
-                                                    "second arg must be a dict",
-                                                );
+                                                    .as_dict()?;
+
                                                 AlternateColorSpace::CalRGB(
                                                     CalRgb {
                                                         white_point: get(
                                                             doc,
                                                             dict,
                                                             b"WhitePoint",
-                                                        ),
+                                                        )?,
                                                         black_point: get(
                                                             doc,
                                                             dict,
                                                             b"BackPoint",
-                                                        ),
+                                                        )?,
                                                         gamma: get(
                                                             doc, dict, b"Gamma",
-                                                        ),
+                                                        )?,
                                                         matrix: get(
                                                             doc, dict,
                                                             b"Matrix",
-                                                        ),
+                                                        )?,
                                                     },
                                                 )
                                             }
@@ -1583,15 +1582,15 @@ impl ColorSpace {
                                                         doc,
                                                         dict,
                                                         b"WhitePoint",
-                                                    ),
+                                                    )?,
                                                     black_point: get(
                                                         doc,
                                                         dict,
                                                         b"BackPoint",
-                                                    ),
+                                                    )?,
                                                     range: get(
                                                         doc, dict, b"Range",
-                                                    ),
+                                                    )?,
                                                 })
                                             }
                                             _ => Err(OutputError::from(
@@ -1608,7 +1607,7 @@ impl ColorSpace {
                             let tint_transform = Box::new(Function::new(
                                 doc,
                                 maybe_deref(doc, &cs[3])?,
-                            ));
+                            )?);
                             Ok(Self::Separation(Separation {
                                 name,
                                 alternate_space,
@@ -1625,26 +1624,26 @@ impl ColorSpace {
                         "CalGray" => {
                             let dict = cs[1].as_dict()?;
                             Ok(Self::CalGray(CalGray {
-                                white_point: get(doc, dict, b"WhitePoint"),
-                                black_point: get(doc, dict, b"BackPoint"),
-                                gamma: get(doc, dict, b"Gamma"),
+                                white_point: get(doc, dict, b"WhitePoint")?,
+                                black_point: get(doc, dict, b"BackPoint")?,
+                                gamma: get(doc, dict, b"Gamma")?,
                             }))
                         }
                         "CalRGB" => {
                             let dict = cs[1].as_dict()?;
                             Ok(Self::CalRgb(CalRgb {
-                                white_point: get(doc, dict, b"WhitePoint"),
-                                black_point: get(doc, dict, b"BackPoint"),
-                                gamma: get(doc, dict, b"Gamma"),
-                                matrix: get(doc, dict, b"Matrix"),
+                                white_point: get(doc, dict, b"WhitePoint")?,
+                                black_point: get(doc, dict, b"BackPoint")?,
+                                gamma: get(doc, dict, b"Gamma")?,
+                                matrix: get(doc, dict, b"Matrix")?,
                             }))
                         }
                         "Lab" => {
                             let dict = cs[1].as_dict()?;
                             Ok(Self::Lab(Lab {
-                                white_point: get(doc, dict, b"WhitePoint"),
-                                black_point: get(doc, dict, b"BackPoint"),
-                                range: get(doc, dict, b"Range"),
+                                white_point: get(doc, dict, b"WhitePoint")?,
+                                black_point: get(doc, dict, b"BackPoint")?,
+                                range: get(doc, dict, b"Range")?,
                             }))
                         }
                         "Pattern" => Ok(Self::Pattern),
@@ -1732,12 +1731,12 @@ impl<'a> Processor<'a> {
                 "cm" => {
                     assert!(operation.operands.len() == 6);
                     let m = Transform2D::row_major(
-                        as_num(&operation.operands[0]),
-                        as_num(&operation.operands[1]),
-                        as_num(&operation.operands[2]),
-                        as_num(&operation.operands[3]),
-                        as_num(&operation.operands[4]),
-                        as_num(&operation.operands[5]),
+                        as_num(&operation.operands[0])?,
+                        as_num(&operation.operands[1])?,
+                        as_num(&operation.operands[2])?,
+                        as_num(&operation.operands[3])?,
+                        as_num(&operation.operands[4])?,
+                        as_num(&operation.operands[5])?,
                     );
                     gs.ctm = gs.ctm.pre_transform(&m);
                 }
@@ -1753,13 +1752,21 @@ impl<'a> Processor<'a> {
                 "SC" | "SCN" => {
                     gs.stroke_color = match gs.stroke_colorspace {
                         ColorSpace::Pattern => Vec::new(),
-                        _ => operation.operands.iter().map(as_num).collect(),
+                        _ => operation
+                            .operands
+                            .iter()
+                            .map(as_num)
+                            .collect::<error::Result<Vec<_>>>()?,
                     };
                 }
                 "sc" | "scn" => {
                     gs.fill_color = match gs.fill_colorspace {
                         ColorSpace::Pattern => Vec::new(),
-                        _ => operation.operands.iter().map(as_num).collect(),
+                        _ => operation
+                            .operands
+                            .iter()
+                            .map(as_num)
+                            .collect::<error::Result<Vec<_>>>()?,
                     };
                 }
                 "G" | "g" | "RG" | "rg" | "K" | "k" => {}
@@ -1813,20 +1820,20 @@ impl<'a> Processor<'a> {
                     )))?,
                 },
                 "Tc" => {
-                    gs.ts.character_spacing = as_num(&operation.operands[0]);
+                    gs.ts.character_spacing = as_num(&operation.operands[0])?;
                 }
                 "Tw" => {
-                    gs.ts.word_spacing = as_num(&operation.operands[0]);
+                    gs.ts.word_spacing = as_num(&operation.operands[0])?;
                 }
                 "Tz" => {
                     gs.ts.horizontal_scaling =
-                        as_num(&operation.operands[0]) / 100.;
+                        as_num(&operation.operands[0])? / 100.;
                 }
                 "TL" => {
-                    gs.ts.leading = as_num(&operation.operands[0]);
+                    gs.ts.leading = as_num(&operation.operands[0])?;
                 }
                 "Tf" => {
-                    let fonts: &Dictionary = get(doc, resources, b"Font");
+                    let fonts: &Dictionary = get(doc, resources, b"Font")?;
                     let name = operation.operands[0].as_name()?;
                     let font = match font_table.entry(name.to_owned()) {
                         Entry::Occupied(en) => {
@@ -1835,7 +1842,7 @@ impl<'a> Processor<'a> {
                         Entry::Vacant(en) => {
                             let font = make_font(
                                 doc,
-                                get::<&Dictionary>(doc, fonts, name),
+                                get::<&Dictionary>(doc, fonts, name)?,
                             )?;
                             Ok(en.insert(font))
                         }
@@ -1844,20 +1851,20 @@ impl<'a> Processor<'a> {
 
                     gs.ts.font = Some(font);
 
-                    gs.ts.font_size = as_num(&operation.operands[1]);
+                    gs.ts.font_size = as_num(&operation.operands[1])?;
                 }
                 "Ts" => {
-                    gs.ts.rise = as_num(&operation.operands[0]);
+                    gs.ts.rise = as_num(&operation.operands[0])?;
                 }
                 "Tm" => {
                     assert!(operation.operands.len() == 6);
                     tlm = Transform2D::row_major(
-                        as_num(&operation.operands[0]),
-                        as_num(&operation.operands[1]),
-                        as_num(&operation.operands[2]),
-                        as_num(&operation.operands[3]),
-                        as_num(&operation.operands[4]),
-                        as_num(&operation.operands[5]),
+                        as_num(&operation.operands[0])?,
+                        as_num(&operation.operands[1])?,
+                        as_num(&operation.operands[2])?,
+                        as_num(&operation.operands[3])?,
+                        as_num(&operation.operands[4])?,
+                        as_num(&operation.operands[5])?,
                     );
                     gs.ts.tm = tlm;
                     output.end_line()?;
@@ -1868,8 +1875,8 @@ impl<'a> Processor<'a> {
                       More precisely, this operator performs the following assignments:
                     */
                     assert!(operation.operands.len() == 2);
-                    let tx = as_num(&operation.operands[0]);
-                    let ty = as_num(&operation.operands[1]);
+                    let tx = as_num(&operation.operands[0])?;
+                    let ty = as_num(&operation.operands[1])?;
 
                     tlm = tlm.pre_transform(&Transform2D::create_translation(
                         tx, ty,
@@ -1883,8 +1890,8 @@ impl<'a> Processor<'a> {
                       As a side effect, this operator sets the leading parameter in the text state.
                     */
                     assert!(operation.operands.len() == 2);
-                    let tx = as_num(&operation.operands[0]);
-                    let ty = as_num(&operation.operands[1]);
+                    let tx = as_num(&operation.operands[0])?;
+                    let ty = as_num(&operation.operands[1])?;
                     gs.ts.leading = -ty;
 
                     tlm = tlm.pre_transform(&Transform2D::create_translation(
@@ -1915,57 +1922,57 @@ impl<'a> Processor<'a> {
                 }
                 "gs" => {
                     let ext_gstate: &Dictionary =
-                        get(doc, resources, b"ExtGState");
+                        get(doc, resources, b"ExtGState")?;
                     let name = operation.operands[0].as_name()?;
-                    let state: &Dictionary = get(doc, ext_gstate, name);
+                    let state: &Dictionary = get(doc, ext_gstate, name)?;
                     apply_state(doc, &mut gs, state)?;
                 }
                 "i" => {}
                 "w" => {
-                    gs.line_width = as_num(&operation.operands[0]);
+                    gs.line_width = as_num(&operation.operands[0])?;
                 }
                 "J" | "j" | "M" | "d" | "ri" => {}
                 "m" => path.ops.push(PathOp::MoveTo(
-                    as_num(&operation.operands[0]),
-                    as_num(&operation.operands[1]),
+                    as_num(&operation.operands[0])?,
+                    as_num(&operation.operands[1])?,
                 )),
                 "l" => path.ops.push(PathOp::LineTo(
-                    as_num(&operation.operands[0]),
-                    as_num(&operation.operands[1]),
+                    as_num(&operation.operands[0])?,
+                    as_num(&operation.operands[1])?,
                 )),
                 "c" => path.ops.push(PathOp::CurveTo(
-                    as_num(&operation.operands[0]),
-                    as_num(&operation.operands[1]),
-                    as_num(&operation.operands[2]),
-                    as_num(&operation.operands[3]),
-                    as_num(&operation.operands[4]),
-                    as_num(&operation.operands[5]),
+                    as_num(&operation.operands[0])?,
+                    as_num(&operation.operands[1])?,
+                    as_num(&operation.operands[2])?,
+                    as_num(&operation.operands[3])?,
+                    as_num(&operation.operands[4])?,
+                    as_num(&operation.operands[5])?,
                 )),
                 "v" => {
                     let (x, y) = path.current_point()?;
                     path.ops.push(PathOp::CurveTo(
                         x,
                         y,
-                        as_num(&operation.operands[0]),
-                        as_num(&operation.operands[1]),
-                        as_num(&operation.operands[2]),
-                        as_num(&operation.operands[3]),
+                        as_num(&operation.operands[0])?,
+                        as_num(&operation.operands[1])?,
+                        as_num(&operation.operands[2])?,
+                        as_num(&operation.operands[3])?,
                     ))
                 }
                 "y" => path.ops.push(PathOp::CurveTo(
-                    as_num(&operation.operands[0]),
-                    as_num(&operation.operands[1]),
-                    as_num(&operation.operands[2]),
-                    as_num(&operation.operands[3]),
-                    as_num(&operation.operands[2]),
-                    as_num(&operation.operands[3]),
+                    as_num(&operation.operands[0])?,
+                    as_num(&operation.operands[1])?,
+                    as_num(&operation.operands[2])?,
+                    as_num(&operation.operands[3])?,
+                    as_num(&operation.operands[2])?,
+                    as_num(&operation.operands[3])?,
                 )),
                 "h" => path.ops.push(PathOp::Close),
                 "re" => path.ops.push(PathOp::Rect(
-                    as_num(&operation.operands[0]),
-                    as_num(&operation.operands[1]),
-                    as_num(&operation.operands[2]),
-                    as_num(&operation.operands[3]),
+                    as_num(&operation.operands[0])?,
+                    as_num(&operation.operands[1])?,
+                    as_num(&operation.operands[2])?,
+                    as_num(&operation.operands[3])?,
                 )),
                 "s" | "f*" | "B" | "B*" | "b" => {}
                 "S" => {
@@ -1999,9 +2006,9 @@ impl<'a> Processor<'a> {
                 "Do" => {
                     // `Do` process an entire subdocument, so we do a recursive call to `process_stream`
                     // with the subdocument content and resources
-                    let xobject: &Dictionary = get(doc, resources, b"XObject");
+                    let xobject: &Dictionary = get(doc, resources, b"XObject")?;
                     let name = operation.operands[0].as_name()?;
-                    let xf: &Stream = get(doc, xobject, name);
+                    let xf: &Stream = get(doc, xobject, name)?;
                     let resources = maybe_get_obj(doc, &xf.dict, b"Resources")
                         .and_then(|n| n.as_dict().ok())
                         .unwrap_or(resources);
@@ -2510,7 +2517,7 @@ fn get_inherited<'a, T: FromObj<'a>>(
     dict: &'a Dictionary,
     key: &[u8],
 ) -> Option<T> {
-    let o: Option<T> = get(doc, dict, key);
+    let o: Option<T> = get(doc, dict, key).ok();
     if let Some(o) = o {
         Some(o)
     } else {
@@ -2563,7 +2570,7 @@ pub fn output_doc(
                 ury: media_box[3],
             };
 
-            let art_box = get::<Option<Vec<f64>>>(doc, page_dict, b"ArtBox")
+            let art_box = get::<Option<Vec<f64>>>(doc, page_dict, b"ArtBox")?
                 .map(|x| (x[0], x[1], x[2], x[3]));
 
             output.begin_page(page_num, &media_box, art_box)?;
