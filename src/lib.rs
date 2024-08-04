@@ -61,7 +61,7 @@ fn pdf_to_utf8(s: &[u8]) -> error::Result<String> {
     let s = if s.len() > 2 && s[0] == 0xfe && s[1] == 0xff {
         UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&s[2..])
-            .ok_or_else(|| OutputError::from("TODO"))?
+            .ok_or_else(|| OutputError::from("TODO pdf_to_utf8"))?
             .to_string()
     } else {
         let r: Vec<u8> = s
@@ -75,7 +75,7 @@ fn pdf_to_utf8(s: &[u8]) -> error::Result<String> {
 
         UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&r)
-            .ok_or_else(|| OutputError::from("TODO"))?
+            .ok_or_else(|| OutputError::from("TODO pdf_to_utf8"))?
             .to_string()
     };
 
@@ -86,7 +86,7 @@ fn to_utf8(encoding: &[u16], s: &[u8]) -> error::Result<String> {
     let r = if s.len() > 2 && s[0] == 0xfe && s[1] == 0xff {
         UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&s[2..])
-            .ok_or_else(|| OutputError::from("TODO"))?
+            .ok_or_else(|| OutputError::from("TODO to_utf8"))?
             .to_string()
     } else {
         let r: Vec<u8> = s
@@ -100,7 +100,7 @@ fn to_utf8(encoding: &[u16], s: &[u8]) -> error::Result<String> {
 
         UTF_16BE
             .decode_without_bom_handling_and_without_replacement(&r)
-            .ok_or_else(|| OutputError::from("TODO"))?
+            .ok_or_else(|| OutputError::from("TODO to_utf8"))?
             .to_string()
     };
 
@@ -201,7 +201,7 @@ impl<'a, T: FromObj<'a>> FromObj<'a> for [T; 4] {
                 match all {
                     // TODO Find a nicer way to do this
                     Ok(all) => {
-                        let err = || OutputError::from("TODO");
+                        let err = || OutputError::from("TODO from_obj");
                         let mut all = all.into_iter();
                         let n1 = all.next().ok_or_else(err)?;
                         let n2 = all.next().ok_or_else(err)?;
@@ -232,7 +232,7 @@ impl<'a, T: FromObj<'a>> FromObj<'a> for [T; 3] {
                     .collect::<error::Result<Vec<_>>>();
                 match all {
                     Ok(all) => {
-                        let err = || OutputError::from("TODO");
+                        let err = || OutputError::from("TODO from_obj");
                         let mut all = all.into_iter();
                         let n1 = all.next().ok_or_else(err)?;
                         let n2 = all.next().ok_or_else(err)?;
@@ -403,7 +403,7 @@ fn encoding_to_unicode_table(name: &[u8]) -> error::Result<Vec<u16>> {
         .map(|x| {
             if let &Some(x) = x {
                 glyphnames::name_to_unicode(x)
-                    .ok_or_else(|| OutputError::from("TODO"))
+                    .ok_or_else(|| OutputError::from("TODO encoding"))
             } else {
                 Ok(0)
             }
@@ -480,8 +480,9 @@ impl<'a> PdfSimpleFont<'a> {
                             }
                             Object::Name(n) => {
                                 let name = pdf_to_utf8(n)?;
-                                // XXX: names of Type1 fonts can map to arbitrary strings instead of real
-                                // unicode names, so we should probably handle this differently
+                                // XXX: names of Type1 fonts can map to arbitrary
+                                // strings instead of real unicode names, so we
+                                // should probably handle this differently
                                 let unicode =
                                     glyphnames::name_to_unicode(&name);
                                 if let Some(unicode) = unicode {
@@ -490,7 +491,8 @@ impl<'a> PdfSimpleFont<'a> {
                                         unicode_map
                                     {
                                         match unicode_map.entry(code as u32) {
-                                            // If there's a unicode table entry missing use one based on the name
+                                            // If there's a unicode table entry
+                                            // missing use one based on the name
                                             Entry::Vacant(v) => {
                                                 let be = [unicode];
                                                 let s =
@@ -506,8 +508,11 @@ impl<'a> PdfSimpleFont<'a> {
                                             if base_name
                                                 .contains("FontAwesome") =>
                                         {
-                                            // the fontawesome tex package will use glyph names that don't have a corresponding unicode
-                                            // code point, so we'll use an empty string instead. See issue #76
+                                            // the fontawesome tex package will
+                                            // use glyph names that don't have
+                                            // a corresponding unicode code
+                                            // point, so we'll use an empty
+                                            // string instead. See issue #76
                                             match unicode_map.entry(code as u32)
                                             {
                                                 Entry::Vacant(v) => {
@@ -556,7 +561,7 @@ impl<'a> PdfSimpleFont<'a> {
                             .map(|x| {
                                 if let &Some(x) = x {
                                     glyphnames::name_to_unicode(x).ok_or_else(
-                                        || OutputError::from("TODO"),
+                                        || OutputError::from("TODO font"),
                                     )
                                 } else {
                                     Ok(0)
@@ -567,7 +572,7 @@ impl<'a> PdfSimpleFont<'a> {
                 }
             }
             _ => {
-                Err(OutputError::from("TODO"))?;
+                Err(OutputError::from("TODO font"))?;
             }
         }
 
@@ -600,7 +605,9 @@ impl<'a> PdfSimpleFont<'a> {
                     if let Some(ref encoding) = encoding_table {
                         for w in font_metrics.2 {
                             let c = glyphnames::name_to_unicode(w.2)
-                                .ok_or_else(|| OutputError::from("TODO"))?;
+                                .ok_or_else(|| {
+                                    OutputError::from("TODO font")
+                                })?;
                             for (i, item) in encoding.iter().enumerate() {
                                 if *item == c {
                                     width_map.insert(i as CharCode, w.1);
@@ -704,11 +711,9 @@ impl<'a> PdfType3Font<'a> {
     fn new(doc: &'a Document, font: &'a Dictionary) -> error::Result<Self> {
         let unicode_map = get_unicode_map(doc, font).ok();
         let encoding: Option<&Object> = get(doc, font, b"Encoding");
-        let encoding_table;
-        match encoding {
+        let encoding_table = match encoding {
             Some(Object::Name(encoding_name)) => {
-                encoding_table =
-                    Some(encoding_to_unicode_table(encoding_name)?);
+                Some(encoding_to_unicode_table(encoding_name)?)
             }
             Some(Object::Dictionary(encoding)) => {
                 let mut table = if let Some(base_encoding) =
@@ -729,8 +734,9 @@ impl<'a> PdfType3Font<'a> {
                             }
                             Object::Name(n) => {
                                 let name = pdf_to_utf8(n);
-                                // XXX: names of Type1 fonts can map to arbitrary strings instead of real
-                                // unicode names, so we should probably handle this differently
+                                // XXX: names of Type1 fonts can map to arbitrary
+                                // strings instead of real unicode names, so
+                                // we should probably handle this differently
                                 let unicode =
                                     glyphnames::name_to_unicode(&name?);
                                 if let Some(unicode) = unicode {
@@ -745,24 +751,23 @@ impl<'a> PdfType3Font<'a> {
                     }
                 }
 
-                encoding_table = Some(table);
+                Some(table)
             }
-            _ => {
-                panic!()
-            }
-        }
+            _ => None,
+        };
 
         let first_char: i64 = get(doc, font, b"FirstChar");
         let last_char: i64 = get(doc, font, b"LastChar");
         let widths: Vec<f64> = get(doc, font, b"Widths");
         let max = widths.len() as i64;
-
-        let mut width_map = HashMap::new();
-
-        for (i, w) in widths.into_iter().enumerate() {
-            let i = i as i64;
-            width_map.insert((first_char + i) as CharCode, w);
-        }
+        let width_map = widths
+            .into_iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let i = i as i64;
+                ((first_char + i) as CharCode, w)
+            })
+            .collect::<HashMap<_, _>>();
 
         if (first_char + max - 1) == last_char {
             Ok(Self {
@@ -773,7 +778,7 @@ impl<'a> PdfType3Font<'a> {
                 unicode_map,
             })
         } else {
-            Err(OutputError::from("TODO"))
+            Err(OutputError::from("TODO font"))
         }
     }
 }
@@ -794,7 +799,7 @@ impl<'a> Iterator for PdfFontIter<'a> {
 }
 
 trait PdfFont: Debug {
-    fn get_width(&self, id: CharCode) -> f64;
+    fn get_width(&self, id: CharCode) -> Option<f64>;
     fn next_char(&self, iter: &mut Iter<u8>) -> Option<(CharCode, u8)>;
     fn decode_char(&self, char: CharCode) -> error::Result<String>;
 }
@@ -809,14 +814,14 @@ impl<'a> dyn PdfFont + 'a {
 }
 
 impl<'a> PdfFont for PdfSimpleFont<'a> {
-    fn get_width(&self, id: CharCode) -> f64 {
+    fn get_width(&self, id: CharCode) -> Option<f64> {
         let width = self.widths.get(&id);
         if let Some(width) = width {
-            *width
+            Some(*width)
         } else {
             let mut widths = self.widths.iter().collect::<Vec<_>>();
             widths.sort_by_key(|x| x.0);
-            self.missing_width
+            Some(self.missing_width)
         }
     }
 
@@ -824,35 +829,39 @@ impl<'a> PdfFont for PdfSimpleFont<'a> {
         iter.next().map(|x| (*x as CharCode, 1))
     }
 
-    fn decode_char(&self, char: CharCode) -> error::Result<String> {
-        let slice = [char as u8];
-        if let Some(ref unicode_map) = self.unicode_map {
-            let s = unicode_map.get(&char);
-            let s = match s {
-                None => {
-                    // some pdf's like http://arxiv.org/pdf/2312.00064v1 are missing entries in their unicode map but do have
-                    // entries in the encoding.
-                    let encoding =
-                        self.encoding.as_ref().map(|x| &x[..]).ok_or_else(
-                            || {
-                                OutputError::from(
-                                    "missing unicode map and encoding",
-                                )
-                            },
-                        )?;
-                    Ok(to_utf8(encoding, &slice)?)
-                }
-                Some(s) => Ok(s.clone()),
-            };
-            return s;
-        }
-        let encoding = self
-            .encoding
-            .as_ref()
-            .map(|x| &x[..])
-            .unwrap_or(PDF_DOC_ENCODING);
+    fn decode_char(&self, c: CharCode) -> error::Result<String> {
+        let slice = [c as u8];
 
-        to_utf8(encoding, &slice)
+        match &self.unicode_map {
+            Some(unicode_map) => {
+                match unicode_map.get(&c) {
+                    None => {
+                        // some pdf's like http://arxiv.org/pdf/2312.00064v1
+                        // are missing entries in their unicode map but do have
+                        // entries in the encoding.
+                        let encoding =
+                            self.encoding.as_ref().map(|x| &x[..]).ok_or_else(
+                                || {
+                                    OutputError::from(
+                                        "missing unicode map and encoding",
+                                    )
+                                },
+                            )?;
+                        Ok(to_utf8(encoding, &slice)?)
+                    }
+                    Some(s) => Ok(s.clone()),
+                }
+            }
+            None => {
+                let encoding = self
+                    .encoding
+                    .as_ref()
+                    .map(|x| &x[..])
+                    .unwrap_or(PDF_DOC_ENCODING);
+
+                to_utf8(encoding, &slice)
+            }
+        }
     }
 }
 
@@ -863,18 +872,9 @@ impl<'a> fmt::Debug for PdfSimpleFont<'a> {
 }
 
 impl<'a> PdfFont for PdfType3Font<'a> {
-    fn get_width(&self, id: CharCode) -> f64 {
-        let width = self.widths.get(&id);
-        if let Some(width) = width {
-            *width
-        } else {
-            panic!("missing width for {} {:?}", id, self.font);
-        }
+    fn get_width(&self, id: CharCode) -> Option<f64> {
+        self.widths.get(&id).copied()
     }
-    /*fn decode(&self, chars: &[u8]) -> String {
-        let encoding = self.encoding.as_ref().map(|x| &x[..]).unwrap_or(&PDFDocEncoding);
-        to_utf8(encoding, chars)
-    }*/
 
     fn next_char(&self, iter: &mut Iter<u8>) -> Option<(CharCode, u8)> {
         iter.next().map(|x| (*x as CharCode, 1))
@@ -968,7 +968,7 @@ fn get_unicode_map<'a>(
             to_unicode
         )))?,
     }
-    unicode_map.ok_or_else(|| OutputError::from("TODO"))
+    unicode_map.ok_or_else(|| OutputError::from("TODO get_unicode_map"))
 }
 
 impl<'a> PdfCidFont<'a> {
@@ -1051,12 +1051,12 @@ impl<'a> PdfCidFont<'a> {
 }
 
 impl<'a> PdfFont for PdfCidFont<'a> {
-    fn get_width(&self, id: CharCode) -> f64 {
+    fn get_width(&self, id: CharCode) -> Option<f64> {
         let width = self.widths.get(&id);
         if let Some(width) = width {
-            *width
+            Some(*width)
         } else {
-            self.default_width.unwrap()
+            self.default_width
         }
     }
 
@@ -1278,7 +1278,11 @@ fn show_text(
     output: &mut dyn OutputDev,
 ) -> error::Result<()> {
     let ts = &mut gs.ts;
-    let font = ts.font.as_ref().unwrap();
+    let font = ts
+        .font
+        .as_ref()
+        .ok_or_else(|| OutputError::from("missing font"))?;
+
     output.begin_word()?;
 
     for (c, length) in font.char_codes(s) {
@@ -1292,7 +1296,10 @@ fn show_text(
             ts.rise,
         );
         let trm = tsm.post_transform(&ts.tm.post_transform(&gs.ctm));
-        let w0 = font.get_width(c) / 1000.;
+        let w0 = font
+            .get_width(c)
+            .ok_or_else(|| OutputError::from("missing width"))?
+            / 1000.;
 
         let mut spacing = ts.character_spacing;
         // "Word spacing is applied to every occurrence of the single-byte character code 32 in a
@@ -1334,36 +1341,47 @@ pub struct MediaBox {
     pub ury: f64,
 }
 
-fn apply_state(doc: &Document, gs: &mut GraphicsState, state: &Dictionary) {
-    for (k, v) in state.iter() {
+fn apply_state(
+    doc: &Document,
+    gs: &mut GraphicsState,
+    state: &Dictionary,
+) -> error::Result<()> {
+    state.iter().try_for_each(|(k, v)| {
         let k: &[u8] = k.as_ref();
         match k {
-            b"SMask" => match maybe_deref(doc, v).unwrap() {
+            b"SMask" => match maybe_deref(doc, v)? {
                 Object::Name(name) => {
                     if name == b"None" {
                         gs.smask = None;
+                        Ok(())
                     } else {
-                        panic!("unexpected smask name")
+                        Err(OutputError::from(format!("unexpected smask name")))
                     }
                 }
                 Object::Dictionary(dict) => {
                     gs.smask = Some(dict.clone());
+                    Ok(())
                 }
-                _ => {
-                    panic!("unexpected smask type {:?}", v)
-                }
+                _ => Err(OutputError::from(format!(
+                    "unexpected smask type {:?}",
+                    v
+                ))),
             },
             b"Type" => match v {
                 Object::Name(name) => {
-                    assert_eq!(name, b"ExtGState")
+                    if name == b"ExtGState" {
+                        Ok(())
+                    } else {
+                        Err(OutputError::from("bad name"))
+                    }
                 }
-                _ => {
-                    panic!("unexpected type")
-                }
+                _ => Err(OutputError::from("unexpected type")),
             },
-            _ => {}
+            _ => Ok(()),
         }
-    }
+    })?;
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1387,11 +1405,15 @@ impl Path {
     }
 
     fn current_point(&self) -> error::Result<(f64, f64)> {
-        match *self.ops.last().unwrap() {
+        match *self
+            .ops
+            .last()
+            .ok_or_else(|| OutputError::from("missing op"))?
+        {
             PathOp::MoveTo(x, y) => Ok((x, y)),
             PathOp::LineTo(x, y) => Ok((x, y)),
             PathOp::CurveTo(_, _, _, _, x, y) => Ok((x, y)),
-            _ => Err(OutputError::from("TODO")),
+            _ => Err(OutputError::from("TODO current_point")),
         }
     }
 }
@@ -1660,7 +1682,7 @@ impl<'a> Processor<'a> {
         media_box: &MediaBox,
         output: &mut dyn OutputDev,
     ) -> Result<(), OutputError> {
-        let content = Content::decode(&content).unwrap();
+        let content = Content::decode(&content)?;
         let mut font_table = HashMap::new();
         let mut gs: GraphicsState = GraphicsState {
             ts: TextState {
@@ -1720,14 +1742,13 @@ impl<'a> Processor<'a> {
                     gs.ctm = gs.ctm.pre_transform(&m);
                 }
                 "CS" => {
-                    let name = operation.operands[0].as_name().unwrap();
+                    let name = operation.operands[0].as_name()?;
                     gs.stroke_colorspace =
-                        ColorSpace::new(doc, name, resources).unwrap();
+                        ColorSpace::new(doc, name, resources)?;
                 }
                 "cs" => {
-                    let name = operation.operands[0].as_name().unwrap();
-                    gs.fill_colorspace =
-                        ColorSpace::new(doc, name, resources).unwrap();
+                    let name = operation.operands[0].as_name()?;
+                    gs.fill_colorspace = ColorSpace::new(doc, name, resources)?;
                 }
                 "SC" | "SCN" => {
                     gs.stroke_color = match gs.stroke_colorspace {
@@ -1806,14 +1827,20 @@ impl<'a> Processor<'a> {
                 }
                 "Tf" => {
                     let fonts: &Dictionary = get(doc, resources, b"Font");
-                    let name = operation.operands[0].as_name().unwrap();
-                    let font = font_table
-                        .entry(name.to_owned())
-                        .or_insert_with(|| {
-                            make_font(doc, get::<&Dictionary>(doc, fonts, name))
-                                .unwrap()
-                        })
-                        .clone();
+                    let name = operation.operands[0].as_name()?;
+                    let font = match font_table.entry(name.to_owned()) {
+                        Entry::Occupied(en) => {
+                            Ok::<_, OutputError>(en.into_mut())
+                        }
+                        Entry::Vacant(en) => {
+                            let font = make_font(
+                                doc,
+                                get::<&Dictionary>(doc, fonts, name),
+                            )?;
+                            Ok(en.insert(font))
+                        }
+                    }?
+                    .clone();
 
                     gs.ts.font = Some(font);
 
@@ -1891,7 +1918,7 @@ impl<'a> Processor<'a> {
                         get(doc, resources, b"ExtGState");
                     let name = operation.operands[0].as_name()?;
                     let state: &Dictionary = get(doc, ext_gstate, name);
-                    apply_state(doc, &mut gs, state);
+                    apply_state(doc, &mut gs, state)?;
                 }
                 "i" => {}
                 "w" => {
@@ -1973,7 +2000,7 @@ impl<'a> Processor<'a> {
                     // `Do` process an entire subdocument, so we do a recursive call to `process_stream`
                     // with the subdocument content and resources
                     let xobject: &Dictionary = get(doc, resources, b"XObject");
-                    let name = operation.operands[0].as_name().unwrap();
+                    let name = operation.operands[0].as_name()?;
                     let xf: &Stream = get(doc, xobject, name);
                     let resources = maybe_get_obj(doc, &xf.dict, b"Resources")
                         .and_then(|n| n.as_dict().ok())
